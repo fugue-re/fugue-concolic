@@ -118,27 +118,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
         reached
     }
 
-    pub fn step_all<L, B>(&mut self, location: L, until: Bound<B>) -> Result<(Bound<AddressValue>, StepOutcome<Vec<(Location, ConcolicState<O>)>>), Error>
-        where L: Into<Location>,
-              B: IntoAddress {
-
-        self.states.clear();
-
-        let (bound, outcome) = self.machine.step_until(location, until)?;
-
-        match outcome {
-            StepOutcome::Reached => {
-                return Ok((bound, StepOutcome::Reached));
-            },
-            StepOutcome::Halt(states) => {
-                let goals = self.update_states(states, &bound);
-                if goals.len() > 0 {
-                    return Ok((bound, StepOutcome::Halt(goals)));
-                }
-            },
-            _ => unreachable!("StepOutcome::Branch handled in Machine::step_until")
-        }
-
+    pub fn step_all(&mut self) -> Result<(Bound<AddressValue>, StepOutcome<Vec<(Location, ConcolicState<O>)>>), Error> {
         while let Some(StatePriority(_, location, state, bound)) = self.states.pop() {
             self.machine.interpreter_mut().restore_state(state);
             let (nbound, outcome) = self.machine.step_until(location, bound)?;
@@ -160,5 +140,33 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
         }
 
         Err(Error::GoalNotReached)
+    }
+
+    pub fn step_from<L, B>(&mut self, location: L) -> Result<StepOutcome<Vec<(Location, ConcolicState<O>)>>, Error>
+    where L: Into<Location> {
+        self.step_until(location, Bound::unbounded()).map(|(_, v)| v)
+    }
+
+    pub fn step_until<L, B>(&mut self, location: L, until: Bound<B>) -> Result<(Bound<AddressValue>, StepOutcome<Vec<(Location, ConcolicState<O>)>>), Error>
+    where L: Into<Location>,
+          B: IntoAddress {
+        self.states.clear();
+
+        let (bound, outcome) = self.machine.step_until(location, until)?;
+
+        match outcome {
+            StepOutcome::Reached => {
+                return Ok((bound, StepOutcome::Reached));
+            },
+            StepOutcome::Halt(states) => {
+                let goals = self.update_states(states, &bound);
+                if goals.len() > 0 {
+                    return Ok((bound, StepOutcome::Halt(goals)));
+                }
+            },
+            _ => unreachable!("StepOutcome::Branch handled in Machine::step_until")
+        }
+
+        self.step_all()
     }
 }
