@@ -1,0 +1,16 @@
+[package]
+name = "fugue-concolic"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+boolector = "0.4"
+either = "1.6"
+fnv = "1"
+fugue = { version = "0.2", registry = "fugue" }
+fugue-static = { version = "0.2", registry = "fugue" }
+fuguex = { version = "0.2", registry = "fugue" }
+fxhash = "0.2"
+itertools = "0.10"
+parking_lot = "0.11"
+thiserror = "1"
