@@ -149,8 +149,20 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
+    pub fn concrete_state(&self) -> &PCodeState<u8, O> {
+        &self.concrete
+    }
+
+    pub fn concrete_state_mut(&mut self) -> &mut PCodeState<u8, O> {
+        &mut self.concrete
+    }
+
     pub fn push_constraint(&mut self, constraint: Expr) {
         self.constraints.push(constraint.simplify(&self.solver));
+    }
+
+    pub fn solve(&mut self, expr: Expr) -> Option<BitVec> {
+        expr.solve(&mut self.solver, &self.constraints)
     }
 
     pub fn is_symbolic_register(&self, register: &Register) -> bool {
@@ -463,7 +475,7 @@ impl<O: Order> ConcolicState<O> {
         start: u64,
         length: usize,
     ) -> Result<Vec<Expr>, Error> {
-        Self::read_bytes(&self.pages, self.concrete.temporaries(), start, length)
+        Self::read_bytes(&self.temporaries, self.concrete.temporaries(), start, length)
             .map_err(PCodeError::Temporary)
             .map_err(Error::state)
     }
@@ -1012,7 +1024,7 @@ impl<O: Order> ConcolicState<O> {
         operand: &Operand,
         expr: Expr,
     ) {
-        assert_eq!(expr.bits() * 8, operand.size());
+        assert_eq!(expr.bits(), operand.size() * 8);
         match operand {
             Operand::Address { value, .. } => {
                 Self::write_expr(&mut self.pages, value.offset(), expr)
@@ -1033,7 +1045,6 @@ impl<O: Order> ConcolicState<O> {
         expr: Expr,
     ) {
         debug_assert_eq!(expr.bits() % 8, 0);
-
         let at = u64::from(at);
         let page_size = PAGE_SIZE as u64;
         let bits = expr.bits();
@@ -1041,9 +1052,11 @@ impl<O: Order> ConcolicState<O> {
 
         let mut it = (0..bytes).map(|i| {
             if O::ENDIAN == Endian::Big {
-                Expr::extract(expr.clone(), bits - (i * 8) - 8, 8)
+                let lsb = bits - (i * 8) - 8;
+                Expr::extract(expr.clone(), lsb, lsb + 8)
             } else {
-                Expr::extract(expr.clone(), i * 8, 8)
+                let lsb = i * 8;
+                Expr::extract(expr.clone(), lsb, lsb + 8)
             }
         });
 

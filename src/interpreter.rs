@@ -202,6 +202,14 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         self.state.push_constraint(constraint);
     }
 
+    pub fn state(&self) -> &ConcolicState<O> {
+        &self.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut ConcolicState<O> {
+        &mut self.state
+    }
+
     pub fn branch_expr(state: &mut ConcolicState<O>, expr: Expr) -> Result<NextLocation<O>, Error> {
         let mut states = Vec::new();
         let value = expr.simplify(&state.solver);
@@ -224,7 +232,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         }
     }
 
-    pub fn branch_on(state: &mut ConcolicState<O>, pc: &Operand) -> Result<NextLocation<O>, Error> {
+    pub fn ibranch_on(state: &mut ConcolicState<O>, pc: &Operand) -> Result<NextLocation<O>, Error> {
         match state.read_operand_value(pc)? {
             Either::Left(bv) => {
                 let memory_space = state.concrete.memory_space();
@@ -232,6 +240,21 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
                 Ok(NextLocation::Concrete(location))
             }
             Either::Right(expr) => Self::branch_expr(state, expr),
+        }
+    }
+
+    pub fn branch_on(state: &mut ConcolicState<O>, pc: &Operand) -> Result<NextLocation<O>, Error> {
+        if let Operand::Address { value, .. } = pc {
+            Ok(NextLocation::Concrete(Branch::Global(value.clone())))
+        } else {
+            match state.read_operand_value(pc)? {
+                Either::Left(bv) => {
+                    let memory_space = state.concrete.memory_space();
+                    let location = Branch::Global(bv.into_address_value(memory_space));
+                    Ok(NextLocation::Concrete(location))
+                }
+                Either::Right(expr) => Self::branch_expr(state, expr),
+            }
         }
     }
 
@@ -554,7 +577,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             return self.icall(destination);
         }
 
-        match Self::branch_on(&mut self.state, destination)? {
+        match Self::ibranch_on(&mut self.state, destination)? {
             NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
             NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
         }
@@ -600,7 +623,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     }
 
     fn icall(&mut self, destination: &Operand) -> Result<Outcome<Self::Outcome>, Self::Error> {
-        match Self::branch_on(&mut self.state, destination)? {
+        match Self::ibranch_on(&mut self.state, destination)? {
             NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
             NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
         }
@@ -1577,11 +1600,14 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                 .view_values_from(&address)
                 .map_err(StateError::State)?;
 
-            let step_state = StepState::from(
+            let pstep_state = //StepState::from(
                 self.translator
-                    .lift_pcode(&mut self.translator_context, address_value, view)
+                    .lift_pcode(&mut self.translator_context, address_value, &view[..8])
                     .map_err(|e| Error::Lift(address, e))?
-            );
+            //);
+            ;
+
+            let step_state = StepState::from(pstep_state);
 
             let diff = (step_state.fallthrough().offset() - step_state.address().offset()) as usize;
             if self.state.is_symbolic_memory(address, diff) {

@@ -3,6 +3,13 @@ name = "fugue-concolic"
 version = "0.1.0"
 edition = "2018"
 
+[features]
+loader-all = ["fuguex/loader-all"]
+loader-binaryninja = ["fuguex/loader-binaryninja"]
+loader-ghidra = ["fuguex/loader-ghidra"]
+loader-idapro = ["fuguex/loader-idapro"]
+loader-radare = ["fuguex/loader-radare"]
+
 [dependencies]
 boolector = "0.4"
 either = "1.6"

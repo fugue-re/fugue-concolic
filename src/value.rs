@@ -66,7 +66,11 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
 
         let value = self.value();
         self.value = Some(match op {
-            UnOp::NOT => value.not(),
+            UnOp::NOT => if expr.is_bool() {
+                value.slice(0, 0).not().uext(7)
+            } else {
+                value.not()
+            },
             UnOp::NEG => value.neg(),
             UnOp::ABS => {
                 let c = value.sgte(&BV::zero(self.solver(), value.get_width()));
@@ -120,6 +124,8 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
         self.visit_expr(rexpr);
         let rvalue = self.value();
 
+        let is_bool = lexpr.is_bool() || rexpr.is_bool();
+
         self.value = Some(match op {
             BinOp::ADD => lvalue.add(&rvalue),
             BinOp::SUB => lvalue.sub(&rvalue),
@@ -128,9 +134,9 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
             BinOp::MUL => lvalue.mul(&rvalue),
             BinOp::REM => lvalue.urem(&rvalue),
             BinOp::SREM => lvalue.srem(&rvalue),
-            BinOp::AND => lvalue.and(&rvalue),
-            BinOp::OR => lvalue.or(&rvalue),
-            BinOp::XOR => lvalue.xor(&rvalue),
+            BinOp::AND => if is_bool { lvalue.slice(0, 0).and(&rvalue.slice(0, 0)) } else { lvalue.and(&rvalue) },
+            BinOp::OR => if is_bool { lvalue.slice(0, 0).or(&rvalue.slice(0, 0)) } else { lvalue.or(&rvalue) },
+            BinOp::XOR => if is_bool { lvalue.slice(0, 0).xor(&rvalue.slice(0, 0)) } else { lvalue.xor(&rvalue) },
             BinOp::SHL => lvalue.sll(&rvalue),
             BinOp::SHR => lvalue.srl(&rvalue),
             BinOp::SAR => lvalue.sra(&rvalue),
@@ -147,8 +153,7 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
         self.visit_expr(fexpr);
         let rvalue = self.value();
 
-        self.value = Some(cvalue._ne(&BV::zero(self.solver(), cvalue.get_width()))
-            .cond_bv(&lvalue, &rvalue))
+        self.value = Some(cvalue.slice(0, 0).cond_bv(&lvalue, &rvalue))
     }
 
     fn visit_expr_concat(&mut self, lexpr: &'ecode Expr, rexpr: &'ecode Expr) {
@@ -173,7 +178,7 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
         let value = self.value();
 
         self.value = Some(match cast {
-            Cast::Bool => value._ne(&BV::zero(self.solver(), value.get_width())).uext(7),
+            Cast::Bool => value.slice(0, 0).uext(7),
             Cast::Low(bits) => value.slice(*bits as u32 - 1, 0),
             Cast::High(bits) => {
                 let hbit = expr.bits() as u32;
@@ -233,7 +238,7 @@ impl Value for Expr {
             ctxt.solver.push(1);
 
             for constraint in constraints.iter() {
-                constraint.ast(ctxt).assert();
+                constraint.ast(ctxt).slice(0, 0).assert();
             }
 
             let ast = nx.ast(ctxt);
@@ -261,7 +266,7 @@ impl Value for Expr {
             ctxt.solver().push(1);
 
             for constraint in constraints.iter() {
-                constraint.ast(ctxt).assert();
+                constraint.ast(ctxt).slice(0, 0).assert();
             }
 
             let ast = nx.ast(ctxt);

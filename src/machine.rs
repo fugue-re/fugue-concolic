@@ -5,6 +5,7 @@ use fugue::bytes::Order;
 use fugue::ir::{AddressValue, IntoAddress, Translator};
 use fugue::ir::il::Location;
 
+use fuguex::loader::MappedDatabase;
 use fuguex::machine::{Branch, Machine};
 use fuguex::machine::types::{Bound, StepOutcome};
 use fuguex::state::pcode::PCodeState;
@@ -62,7 +63,6 @@ pub struct ConcolicMachine<O: Order, const OPERAND_SIZE: usize> {
     translator: Arc<Translator>
 }
 
-
 impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
     pub fn new(translator: Arc<Translator>, state: PCodeState<u8, O>) -> Self {
         Self {
@@ -74,6 +74,11 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
         }
     }
 
+    pub fn new_from(loader: MappedDatabase<PCodeState<u8, O>>) -> Self {
+        let translator = loader.translator();
+        Self::new(translator, loader.into_state())
+    }
+
     pub fn add_filter<F>(&mut self, f: F)
     where F: FnMut(&Location, &ConcolicState<O>) -> bool + 'static {
         self.state_filters.lock().push(Box::new(f));
@@ -82,6 +87,22 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
     pub fn add_ranker<F>(&mut self, f: F)
     where F: FnMut(&Location, &ConcolicState<O>) -> StateRank + 'static {
         self.state_rankers.lock().push(Box::new(f));
+    }
+
+    pub fn interpreter(&self) -> &ConcolicContext<O, OPERAND_SIZE> {
+        self.machine.interpreter()
+    }
+
+    pub fn interpreter_mut(&mut self) -> &mut ConcolicContext<O, OPERAND_SIZE> {
+        self.machine.interpreter_mut()
+    }
+
+    pub fn state(&self) -> &ConcolicState<O> {
+        self.machine.interpreter().state()
+    }
+
+    pub fn state_mut(&mut self) -> &mut ConcolicState<O> {
+        self.machine.interpreter_mut().state_mut()
     }
 
     fn update_states(&mut self, states: Vec<(Branch, ConcolicState<O>)>, bound: &Bound<AddressValue>) -> Vec<(Location, ConcolicState<O>)> {
@@ -142,7 +163,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
         Err(Error::GoalNotReached)
     }
 
-    pub fn step_from<L, B>(&mut self, location: L) -> Result<StepOutcome<Vec<(Location, ConcolicState<O>)>>, Error>
+    pub fn step_from<L>(&mut self, location: L) -> Result<StepOutcome<Vec<(Location, ConcolicState<O>)>>, Error>
     where L: Into<Location> {
         self.step_until(location, Bound::unbounded()).map(|(_, v)| v)
     }
