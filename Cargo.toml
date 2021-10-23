@@ -12,12 +12,14 @@ loader-radare = ["fuguex/loader-radare"]
 
 [dependencies]
 boolector = "0.4"
-either = "1.6"
+dyn-clone = "1"
+either = "1"
 fnv = "1"
 fugue = { version = "0.2", registry = "fugue" }
 fugue-static = { version = "0.2", registry = "fugue" }
 fuguex = { version = "0.2", registry = "fugue" }
 fxhash = "0.2"
 itertools = "0.10"
+log = "0.4"
 parking_lot = "0.11"
 thiserror = "1"

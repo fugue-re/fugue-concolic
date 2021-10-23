@@ -12,15 +12,18 @@ use fugue::ir::il::pcode::Operand;
 
 use fnv::FnvHashMap as HashMap;
 
+use fuguex::hooks::types::HookCallAction;
 use fuguex::intrinsics::{IntrinsicAction, IntrinsicHandler};
 use fuguex::machine::{Branch, Interpreter, Outcome, StepState};
 use fuguex::state::State;
 use fuguex::state::pcode::PCodeState;
+use fuguex::state::register::ReturnLocation;
 
 use parking_lot::RwLock;
 
 use thiserror::Error;
 
+use crate::hooks::ClonableHookConcolic;
 use crate::state::{ConcolicState, Error as StateError};
 use crate::value::Value;
 
@@ -28,6 +31,8 @@ use crate::value::Value;
 pub enum Error {
     #[error("division by zero")]
     DivisionByZero,
+    #[error(transparent)]
+    Hook(fuguex::hooks::types::Error<StateError>),
     #[error(transparent)]
     Intrinsic(fuguex::intrinsics::Error<StateError>),
     #[error("error lifting instruction at {0}: {1}")]
@@ -66,6 +71,14 @@ impl<O: Order> NextLocation<O> {
         }
     }
 
+    fn unwrap_concrete_address(self) -> AddressValue {
+        if let Self::Concrete(Branch::Global(address)) = self {
+            address
+        } else {
+            panic!("expected NextLocation::Concrete(Branch::Global(_))")
+        }
+    }
+
     fn unwrap_symbolic(self) -> Vec<(Branch, ConcolicState<O>)> {
         if let Self::Symbolic(states) = self {
             states
@@ -79,6 +92,9 @@ pub type Outcomes<O> = Vec<(Branch, ConcolicState<O>)>;
 
 #[derive(Clone)]
 pub struct ConcolicContext<O: Order, const OPERAND_SIZE: usize> {
+    hooks: Vec<
+        Box<dyn ClonableHookConcolic<State = ConcolicState<O>, Error = StateError, Outcome = Outcomes<O>>>,
+    >,
     program_counter: Arc<Operand>,
     state: ConcolicState<O>,
     translator: Arc<Translator>,
@@ -107,6 +123,14 @@ impl ToSignedBytes for bool {
             .concretise_operand_with(dest, self)
             .map_err(Error::State)?;
 
+        let bits = dest.size() * 8;
+        let bv = Either::Left(BitVec::from_u32(if self { 1 } else { 0 }, bits));
+
+        for hook in ctxt.hooks.iter_mut() {
+            hook.hook_operand_write(&mut ctxt.state, dest, &bv)
+                .map_err(Error::Hook)?;
+        }
+
         Ok(())
     }
 }
@@ -132,9 +156,16 @@ impl ToSignedBytes for BitVec {
             target
         };
 
+        let bv = Either::Left(target.clone());
+
         ctxt.state
             .concretise_operand_with(dest, target)
             .map_err(Error::State)?;
+
+        for hook in ctxt.hooks.iter_mut() {
+            hook.hook_operand_write(&mut ctxt.state, dest, &bv)
+                .map_err(Error::Hook)?;
+        }
 
         Ok(())
     }
@@ -162,7 +193,14 @@ impl ToSignedBytes for Expr {
             self
         };
 
-        ctxt.state.write_operand_value(dest, Either::Right(target))?;
+        let expr = Either::Right(target);
+
+        ctxt.state.write_operand_value(dest, expr.clone())?;
+
+        for hook in ctxt.hooks.iter_mut() {
+            hook.hook_operand_write(&mut ctxt.state, dest, &expr)
+                .map_err(Error::Hook)?;
+        }
 
         Ok(())
     }
@@ -189,6 +227,7 @@ where
 impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     pub fn new(translator: Arc<Translator>, state: PCodeState<u8, O>) -> Self {
         Self {
+            hooks: Vec::new(),
             intrinsics: IntrinsicHandler::new(),
             program_counter: Arc::new(state.registers().program_counter().clone()),
             state: ConcolicState::new(translator.clone(), state),
@@ -196,6 +235,14 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             translator_context: translator.context_database(),
             translator,
         }
+    }
+
+    pub fn add_hook<H>(&mut self, hook: H)
+    where
+        H: ClonableHookConcolic<State = ConcolicState<O>, Error = StateError, Outcome = Outcomes<O>>
+            + 'static,
+    {
+        self.hooks.push(Box::new(hook));
     }
 
     pub fn push_constraint(&mut self, constraint: Expr) {
@@ -258,6 +305,79 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         }
     }
 
+    fn get_address(&mut self, source: &Operand) -> Result<Either<AddressValue, Expr>, Error> {
+        match self.state.read_operand_value(source)? {
+            Either::Left(bv) => {
+                let offset = bv
+                    .to_u64()
+                    .ok_or_else(|| Error::UnsupportedAddressSize(bv.bits() * 8))?;
+                Ok(Either::Left(AddressValue::new(self.interpreter_space(), offset)))
+            }
+            Either::Right(expr) => {
+                Ok(Either::Right(expr))
+            }
+        }
+    }
+
+    fn with_return_location<U, F>(&mut self, f: F) -> Result<U, Error>
+    where
+        F: FnOnce(&mut ConcolicState<O>, Either<Operand, Expr>) -> Result<U, Error>,
+    {
+        let rloc = self.state.concrete.registers().return_location().clone();
+        match rloc {
+            ReturnLocation::Register(operand) => {
+                f(&mut self.state, Either::Left(operand))
+            },
+            ReturnLocation::Relative(operand, offset) => {
+                match self.get_address(&operand)? {
+                    Either::Left(address) => {
+                        let operand = Operand::Address {
+                            value: address,
+                            size: self.interpreter_space().address_size(),
+                        };
+                        f(&mut self.state, Either::Left(operand))
+                    },
+                    Either::Right(expr) => {
+                        let offset = BitVec::from_u64(offset, self.interpreter_space().address_size());
+                        let aexpr = Expr::int_add(expr, offset);
+                        f(&mut self.state, Either::Right(aexpr))
+                    }
+                }
+            }
+        }
+    }
+
+    fn skip_return(&mut self) -> Result<NextLocation<O>, Error> {
+        // NOTE: for x86, etc. we need to clean-up the stack
+        // arguments; currently, this is the responsibility of
+        // hooks that issue a `HookCallAction::Skip`.
+        let address = self.with_return_location(|state, operand| match operand {
+            Either::Left(address) => Self::branch_on(state, &address),
+            Either::Right(expr) => Self::branch_expr(state, expr),
+        })?;
+
+        // Next we pop the return address (if needed)
+        let extra_pop = self.state.concrete.convention().default_prototype().extra_pop();
+
+        if extra_pop > 0 {
+            let stack_pointer = self.state.concrete.registers().stack_pointer().clone();
+            let bits = stack_pointer.size() * 8;
+
+            match self.state.read_operand_value(&stack_pointer)? {
+                Either::Left(bv) => {
+                    let address = bv + BitVec::from_u64(extra_pop, bits);
+                    self.state.concretise_operand_with(&stack_pointer, address)?;
+                },
+                Either::Right(expr) => {
+                    let address = Expr::int_add(expr, BitVec::from_u64(extra_pop, bits));
+                    self.state.write_operand_value(&stack_pointer, Either::Right(address))?;
+                },
+            }
+        }
+
+        Ok(address)
+    }
+
     fn lift_bool1<COC, COS, COCO, COSO>(
         &mut self,
         opc: COC,
@@ -274,6 +394,11 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         let rsize = rhs.size();
         if rsize > OPERAND_SIZE {
             return Err(Error::UnsupportedOperandSize(rsize, OPERAND_SIZE));
+        }
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, rhs)
+                .map_err(Error::Hook)?;
         }
 
         let value = match self.state.read_operand_value(rhs)? {
@@ -311,10 +436,20 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             return Err(Error::UnsupportedOperandSize(rsize, OPERAND_SIZE));
         }
 
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, lhs)
+                .map_err(Error::Hook)?;
+        }
+
         let lhs_val = self
             .state
             .read_operand_value(lhs)?
             .map_right(|expr| Expr::cast_bool(expr));
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, rhs)
+                .map_err(Error::Hook)?;
+        }
 
         let rhs_val = self
             .state
@@ -352,6 +487,11 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         let rsize = rhs.size();
         if rsize > OPERAND_SIZE {
             return Err(Error::UnsupportedOperandSize(rsize, OPERAND_SIZE));
+        }
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, rhs)
+                .map_err(Error::Hook)?;
         }
 
         let value = match self.state.read_operand_value(rhs)? {
@@ -399,6 +539,11 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             return Err(Error::UnsupportedOperandSize(rsize, OPERAND_SIZE));
         }
 
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, lhs)
+                .map_err(Error::Hook)?;
+        }
+
         let lhs_val = self
             .state
             .read_operand_value(lhs)?
@@ -407,6 +552,11 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
                 let bits = expr.bits();
                 Expr::cast_signed(expr, bits)
             });
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, rhs)
+                .map_err(Error::Hook)?;
+        }
 
         let rhs_val = self
             .state
@@ -456,6 +606,11 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             return Err(Error::UnsupportedOperandSize(rsize, OPERAND_SIZE));
         }
 
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, rhs)
+                .map_err(Error::Hook)?;
+        }
+
         let format = float_format_from_size(rsize)?;
 
         let value = match self.state.read_operand_value(rhs)? {
@@ -498,12 +653,22 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
 
         assert_eq!(lsize, rsize);
 
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, lhs)
+                .map_err(Error::Hook)?;
+        }
+
         let format = Arc::new(float_format_from_size(rsize)?);
 
         let lhs_val = self
             .state
             .read_operand_value(lhs)?
             .map_right(|expr| Expr::cast_float(expr, format.clone()));
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, rhs)
+                .map_err(Error::Hook)?;
+        }
 
         let rhs_val = self
             .state
@@ -543,6 +708,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
 
     fn fork(&self) -> Self {
         Self {
+            hooks: self.hooks.clone(),
             program_counter: self.program_counter.clone(),
             state: self.state.fork(),
             translator: self.translator.clone(),
@@ -613,7 +779,33 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
 
     fn call(&mut self, destination: &Operand) -> Result<Outcome<Self::Outcome>, Self::Error> {
         match destination {
-            Operand::Address { value, .. } => Ok(Outcome::Branch(Branch::Global(value.clone()))),
+            Operand::Address { value, .. } => {
+                let mut skip = false;
+                let address = value.into();
+
+                for hook in self.hooks.iter_mut() {
+                    match hook
+                        .hook_call(&mut self.state, &address)
+                        .map_err(Error::Hook)?
+                        .action
+                    {
+                        HookCallAction::Pass => (),
+                        HookCallAction::Skip => {
+                            skip = true;
+                        }
+                        HookCallAction::Halt(r) => return Ok(Outcome::Halt(r)),
+                    }
+                }
+
+                if skip {
+                    match self.skip_return()? {
+                        NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
+                        NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
+                    }
+                } else {
+                    Ok(Outcome::Branch(Branch::Global(value.clone())))
+                }
+            },
             Operand::Constant { space, .. }
             | Operand::Register { space, .. }
             | Operand::Variable { space, .. } => {
@@ -624,8 +816,38 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
 
     fn icall(&mut self, destination: &Operand) -> Result<Outcome<Self::Outcome>, Self::Error> {
         match Self::ibranch_on(&mut self.state, destination)? {
-            NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
-            NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
+            location@NextLocation::Concrete(_) => {
+                let mut skip = false;
+                let address_value = location.unwrap_concrete_address();
+                let address = (&address_value).into();
+
+                for hook in self.hooks.iter_mut() {
+                    match hook
+                        .hook_call(&mut self.state, &address)
+                        .map_err(Error::Hook)?
+                        .action
+                    {
+                        HookCallAction::Pass => (),
+                        HookCallAction::Skip => {
+                            skip = true;
+                        }
+                        HookCallAction::Halt(r) => return Ok(Outcome::Halt(r)),
+                    }
+                }
+
+                if skip {
+                    match self.skip_return()? {
+                        NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
+                        NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
+                    }
+                } else {
+                    Ok(Outcome::Branch(Branch::Global(address_value)))
+                }
+            },
+            NextLocation::Symbolic(states) => {
+                // TODO: we need to trigger a call hook
+                Ok(Outcome::Halt(states))
+            },
         }
     }
 
@@ -643,8 +865,19 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             return Err(Error::UnsupportedOperandSize(size, OPERAND_SIZE));
         }
 
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, source)
+                .map_err(Error::Hook)?;
+        }
+
         let sval = self.state.read_operand_value(source)?;
-        self.state.write_operand_value(destination, sval)?;
+
+        self.state.write_operand_value(destination, sval.clone())?;
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_write(&mut self.state, destination, &sval)
+                .map_err(Error::Hook)?;
+        }
 
         Ok(Outcome::Branch(Branch::Next))
     }
@@ -659,6 +892,11 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
         let space_word_size = space.word_size() as u64;
 
         assert_eq!(space_size, source.size());
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, source)
+                .map_err(Error::Hook)?;
+        }
 
         match self.state.read_operand_value(source)? {
             Either::Left(bv) => {
@@ -694,7 +932,14 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                 let value = self
                     .state
                     .read_memory_symbolic(&addr, destination.size() * 8)?;
-                self.state.write_operand_expr(destination, value);
+                self.state.write_operand_expr(destination, value.clone());
+
+                let bv = Either::Right(value);
+
+                for hook in self.hooks.iter_mut() {
+                    hook.hook_operand_write(&mut self.state, destination, &bv)
+                        .map_err(Error::Hook)?;
+                }
 
                 Ok(Outcome::Branch(Branch::Next))
             }
@@ -711,6 +956,11 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
         let space_word_size = space.word_size() as u64;
 
         assert_eq!(space_size, destination.size());
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, destination)
+                .map_err(Error::Hook)?;
+        }
 
         match self.state.read_operand_value(destination)? {
             Either::Left(bv) => {
@@ -1518,6 +1768,16 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             ));
         }
 
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, operand)
+                .map_err(Error::Hook)?;
+        }
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_read(&mut self.state, amount)
+                .map_err(Error::Hook)?;
+        }
+
         // NOTE: amount is always constant
         let value = match self.state.read_operand_value(operand)? {
             Either::Left(bv) => {
@@ -1556,7 +1816,12 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             },
         };
 
-        self.state.write_operand_value(destination, value)?;
+        self.state.write_operand_value(destination, value.clone())?;
+
+        for hook in self.hooks.iter_mut() {
+            hook.hook_operand_write(&mut self.state, destination, &value)
+                .map_err(Error::Hook)?;
+        }
 
         Ok(Outcome::Branch(Branch::Next))
     }
