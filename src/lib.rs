@@ -1,3 +1,4 @@
+pub mod expr;
 pub mod hooks;
 pub mod interpreter;
 pub mod machine;

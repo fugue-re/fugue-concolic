@@ -19,6 +19,7 @@ fugue = { version = "0.2", registry = "fugue" }
 fugue-static = { version = "0.2", registry = "fugue" }
 fuguex = { version = "0.2", registry = "fugue" }
 fxhash = "0.2"
+hashconsing = "1"
 itertools = "0.10"
 log = "0.4"
 parking_lot = "0.11"
