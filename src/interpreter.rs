@@ -269,7 +269,10 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
 
             let mut fork = state.fork();
             fork.push_constraint(Expr::int_eq(val, value.clone()));
-            states.push((location, fork));
+
+            if fork.is_sat() {
+                states.push((location, fork));
+            }
         }
 
         if states.is_empty() {
@@ -352,7 +355,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         // arguments; currently, this is the responsibility of
         // hooks that issue a `HookCallAction::Skip`.
         let address = self.with_return_location(|state, operand| match operand {
-            Either::Left(address) => Self::branch_on(state, &address),
+            Either::Left(address) => Self::ibranch_on(state, &address),
             Either::Right(expr) => Self::branch_expr(state, expr),
         })?;
 
@@ -766,13 +769,33 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                 let mut tstate = self.state.fork();
                 let mut fstate = self.state.fork();
 
-                tstate.push_constraint(Expr::bool_eq(expr.clone(), BitVec::from_u8(1, 8)));
+                tstate.push_constraint(Expr::bool_eq(expr.clone(), BitVec::one(8)));
+                let tsat = tstate.is_sat();
 
-                let states = Self::branch_on(&mut tstate, destination)?;
+                fstate.push_constraint(Expr::bool_eq(expr, BitVec::zero(8)));
+                let fsat = fstate.is_sat();
 
-                fstate.push_constraint(Expr::bool_eq(expr, BitVec::from_u8(0, 8)));
+                let states = match (tsat, fsat) {
+                    (true, true) => {
+                        let states = Self::branch_on(&mut tstate, destination);
+                        if let Err(Error::UnsatisfiablePC) = states {
+                            NextLocation::Symbolic(vec![(Branch::Next, fstate)])
+                        } else {
+                            states?.join(tstate, Branch::Next, fstate)
+                        }
+                    },
+                    (true, false) => {
+                        Self::branch_on(&mut tstate, destination)?
+                    },
+                    (false, true) => {
+                        NextLocation::Symbolic(vec![(Branch::Next, fstate)])
+                    },
+                    (false, false) => {
+                        return Err(Error::UnsatisfiablePC)
+                    },
+                };
 
-                Ok(Outcome::Halt(states.join(tstate, Branch::Next, fstate).unwrap_symbolic()))
+                Ok(Outcome::Halt(states.unwrap_symbolic()))
             }
         }
     }

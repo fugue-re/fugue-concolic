@@ -6,21 +6,21 @@
 ///
 /// It should be trivial to switch the backing to a pure symbolic memory
 /// by returning unconstrained symbolic variables for undefined memory.
-use std::mem::{MaybeUninit, transmute};
+use std::collections::BTreeMap;
+use std::mem::{transmute, MaybeUninit};
 use std::sync::Arc;
 
 use either::Either;
 
-use fugue::bytes::{ByteCast, Endian, Order};
 use fugue::bv::BitVec;
-use fugue::ir::{Address, Translator};
+use fugue::bytes::{ByteCast, Endian, Order};
 use fugue::ir::il::ecode::Expr;
 use fugue::ir::il::pcode::{Operand, Register};
+use fugue::ir::{Address, Translator};
 
+use fuguex::state::paged::PagedState;
+use fuguex::state::pcode::{Error as PCodeError, PCodeState};
 use fuguex::state::{IntoStateValues, State, StateOps};
-use fuguex::state::pcode::{PCodeState, Error as PCodeError};
-
-use fxhash::FxHashMap as HashMap;
 
 use itertools::Itertools;
 
@@ -32,7 +32,7 @@ use crate::value::Value;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
-    State(PCodeError),
+    State(#[from] PCodeError),
     #[error("unsatisfiable symbolic address: {0}")]
     UnsatAddress(Expr),
 }
@@ -48,24 +48,26 @@ const PAGE_SIZE: usize = 4096;
 #[derive(Debug, Clone)]
 #[repr(transparent)]
 struct Page {
-    expressions: [Option<Expr>; PAGE_SIZE],
+    expressions: Box<[Option<Expr>; PAGE_SIZE]>,
 }
 
 impl Default for Page {
     fn default() -> Self {
-        let mut expressions: [MaybeUninit<Option<Expr>>; PAGE_SIZE] = unsafe {
+        let mut expressions = Box::<[MaybeUninit<Option<Expr>>; PAGE_SIZE]>::new(unsafe {
             MaybeUninit::uninit().assume_init()
-        };
+        });
 
         for expr in &mut expressions[..] {
             expr.write(None);
         }
 
-        Self { expressions: unsafe { transmute(expressions) } }
+        Self {
+            expressions: unsafe { transmute(expressions) },
+        }
     }
 }
 
-impl From<Page> for [Option<Expr>; PAGE_SIZE] {
+impl From<Page> for Box<[Option<Expr>]> {
     fn from(page: Page) -> Self {
         page.expressions
     }
@@ -87,6 +89,83 @@ impl Page {
             .iter()
             .take_while(|e| e.is_none())
             .count()
+    }
+
+    fn merge_concrete(lc: &[u8], rc: &[u8], constraints: &Expr) -> Option<Self> {
+        let mut page = Self::default();
+        let mut did_change = false;
+        for (p, (l, r)) in page
+            .expressions
+            .iter_mut()
+            .zip(lc.iter().copied().zip(rc.iter().copied()))
+        {
+            if l != r {
+                *p = Some(Expr::ite(
+                    constraints.clone(),
+                    BitVec::from(l),
+                    BitVec::from(r),
+                ));
+                did_change = true
+            }
+        }
+
+        if did_change {
+            Some(page)
+        } else {
+            None
+        }
+    }
+
+    fn merge_side(mut self, lc: &[u8], rc: &[u8], constraints: &Expr) -> Self {
+        for (i, l) in self.expressions.iter_mut().enumerate().take(lc.len()) {
+            *l = match l.take() {
+                Some(s) => Some(Expr::ite(constraints.clone(), s, BitVec::from(rc[i]))),
+                None => {
+                    if lc[i] != rc[i] {
+                        Some(Expr::ite(
+                            constraints.clone(),
+                            BitVec::from(lc[i]),
+                            BitVec::from(rc[i]),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    fn merge_both(mut self, mut rs: Self, lc: &[u8], rc: &[u8], constraints: &Expr) -> Self {
+        for (i, (l, r)) in self
+            .expressions
+            .iter_mut()
+            .zip(rs.expressions.iter_mut())
+            .enumerate()
+            .take(lc.len())
+        {
+            match (l.take(), r.take()) {
+                (Some(s1), Some(s2)) => *l = Some(Expr::ite(constraints.clone(), s1, s2)),
+                (Some(s1), None) => {
+                    *l = Some(Expr::ite(constraints.clone(), s1, BitVec::from(rc[i])))
+                }
+                (None, Some(s2)) => {
+                    *l = Some(Expr::ite(constraints.clone(), BitVec::from(lc[i]), s2))
+                }
+                (None, None) => {
+                    if lc[i] != rc[i] {
+                        *l = Some(Expr::ite(
+                            constraints.clone(),
+                            BitVec::from(lc[i]),
+                            BitVec::from(rc[i]),
+                        ))
+                    } else {
+                        *l = None
+                    }
+                }
+            }
+        }
+        self
     }
 
     pub fn view(&self, start: usize, length: usize) -> &[Option<Expr>] {
@@ -111,9 +190,9 @@ impl Page {
 #[derive(Clone)]
 pub struct ConcolicState<O: Order> {
     pub(crate) solver: SolverContext,
-    pages: HashMap<u64, Page>,
-    registers: HashMap<u64, Page>,
-    temporaries: HashMap<u64, Page>,
+    pages: BTreeMap<u64, Page>,
+    registers: BTreeMap<u64, Page>,
+    temporaries: BTreeMap<u64, Page>,
     pub(crate) concrete: PCodeState<u8, O>,
     pub(crate) constraints: Vec<Expr>,
 }
@@ -141,12 +220,188 @@ impl<O: Order> ConcolicState<O> {
     pub fn new(translator: Arc<Translator>, concrete: PCodeState<u8, O>) -> Self {
         Self {
             solver: SolverContext::new(translator),
-            pages: HashMap::default(),
-            registers: HashMap::default(),
-            temporaries: HashMap::default(),
+            pages: BTreeMap::default(),
+            registers: BTreeMap::default(),
+            temporaries: BTreeMap::default(),
             concrete,
             constraints: Vec::new(),
         }
+    }
+
+    fn merge_memory_pages(
+        s1: &mut BTreeMap<u64, Page>,
+        s2: BTreeMap<u64, Page>,
+        c1: &PagedState<u8>,
+        c2: &PagedState<u8>,
+        lcons: &Expr,
+        rcons: &Expr,
+    ) -> Result<(), <PagedState<u8> as State>::Error> {
+        use itertools::EitherOrBoth::{Both, Left, Right};
+        use std::mem::take;
+
+        let segment_pages = c1
+            .segments()
+            .iter()
+            .map(|(iv, _)| {
+                let start = u64::from(*iv.start()) / PAGE_SIZE as u64;
+                let end = u64::from(*iv.end()) / PAGE_SIZE as u64;
+                (start..=end).into_iter()
+            })
+            .flatten();
+
+        *s1 = take(s1)
+            .into_iter()
+            .merge_join_by(s2.into_iter(), |(i, _), (j, _)| i.cmp(&j))
+            .map(|kv| match kv {
+                Left((p, c)) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &c1.view_values_from(poff).unwrap();
+                    let c2page = &c2.view_values_from(poff).unwrap();
+
+                    (p, c.merge_side(c1page, c2page, &lcons))
+                }
+                Right((p, c)) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &c1.view_values_from(poff).unwrap();
+                    let c2page = &c2.view_values_from(poff).unwrap();
+
+                    (p, c.merge_side(c2page, c1page, &rcons))
+                }
+                Both((p, lc), (_, rc)) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &c1.view_values_from(poff).unwrap();
+                    let c2page = &c2.view_values_from(poff).unwrap();
+
+                    (p, lc.merge_both(rc, c1page, c2page, &lcons))
+                }
+            })
+            .merge_join_by(segment_pages, |(i, _), j| i.cmp(j))
+            .filter_map(|kv| match kv {
+                Left((p, c)) | Both((p, c), _) => Some((p, c)),
+                Right(p) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &c1.view_values_from(poff).unwrap();
+                    let c2page = &c2.view_values_from(poff).unwrap();
+
+                    Page::merge_concrete(c1page, c2page, &lcons).map(|c| (p, c))
+                }
+            })
+            .collect();
+
+        Ok(())
+    }
+
+    fn merge_pages<S: StateOps<Value = u8>>(
+        s1: &mut BTreeMap<u64, Page>,
+        s2: BTreeMap<u64, Page>,
+        c1: &S,
+        c2: &S,
+        lcons: &Expr,
+        rcons: &Expr,
+    ) -> Result<(), <S as State>::Error> {
+        use itertools::EitherOrBoth::{Both, Left, Right};
+        use std::mem::take;
+
+        let size = c1.len();
+        let s1c = c1.view_values(0u64, size)?;
+        let s2c = c2.view_values(0u64, size)?;
+
+        *s1 = take(s1)
+            .into_iter()
+            .merge_join_by(s2.into_iter(), |(i, _), (j, _)| i.cmp(&j))
+            .map(|kv| match kv {
+                Left((p, c)) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &s1c[poff..];
+                    let c2page = &s2c[poff..];
+
+                    (p, c.merge_side(c1page, c2page, &lcons))
+                }
+                Right((p, c)) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &s1c[poff..];
+                    let c2page = &s2c[poff..];
+
+                    (p, c.merge_side(c2page, c1page, &rcons))
+                }
+                Both((p, lc), (_, rc)) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &s1c[poff..];
+                    let c2page = &s2c[poff..];
+
+                    (p, lc.merge_both(rc, c1page, c2page, &lcons))
+                }
+            })
+            .merge_join_by((0..(size / PAGE_SIZE) as u64).into_iter(), |(i, _), j| {
+                i.cmp(j)
+            })
+            .filter_map(|kv| match kv {
+                Left((p, c)) | Both((p, c), _) => Some((p, c)),
+                Right(p) => {
+                    let poff = p as usize * PAGE_SIZE;
+
+                    let c1page = &s1c[poff..];
+                    let c2page = &s2c[poff..];
+
+                    Page::merge_concrete(c1page, c2page, &lcons).map(|c| (p, c))
+                }
+            })
+            .collect();
+
+        Ok(())
+    }
+
+    pub fn merge(&mut self, other: Self) -> Result<(), Error> {
+        use std::mem::take;
+
+        let lcons = take(&mut self.constraints)
+            .into_iter()
+            .fold1(Expr::bool_and)
+            .unwrap();
+        let rcons = other.constraints.into_iter().fold1(Expr::bool_and).unwrap();
+
+        let constraints = Expr::bool_or(lcons.clone(), rcons.clone());
+
+        Self::merge_memory_pages(
+            &mut self.pages,
+            other.pages,
+            self.concrete.memory(),
+            other.concrete.memory(),
+            &lcons,
+            &rcons,
+        )
+        .map_err(PCodeError::Memory)?;
+
+        Self::merge_pages(
+            &mut self.registers,
+            other.registers,
+            self.concrete.registers(),
+            other.concrete.registers(),
+            &lcons,
+            &rcons,
+        )
+        .map_err(PCodeError::Register)?;
+
+        Self::merge_pages(
+            &mut self.temporaries,
+            other.temporaries,
+            self.concrete.temporaries(),
+            other.concrete.temporaries(),
+            &lcons,
+            &rcons,
+        )
+        .map_err(PCodeError::Temporary)?;
+
+        self.constraints = vec![constraints];
+
+        Ok(())
     }
 
     pub fn concrete_state(&self) -> &PCodeState<u8, O> {
@@ -163,6 +418,10 @@ impl<O: Order> ConcolicState<O> {
 
     pub fn solve(&mut self, expr: Expr) -> Option<BitVec> {
         expr.solve(&mut self.solver, &self.constraints)
+    }
+
+    pub fn is_sat(&mut self) -> bool {
+        self.solver.is_sat(&self.constraints)
     }
 
     pub fn is_symbolic_register(&self, register: &Register) -> bool {
@@ -200,7 +459,7 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
-    fn is_symbolic(pages: &HashMap<u64, Page>, start: u64, length: usize) -> bool {
+    fn is_symbolic(pages: &BTreeMap<u64, Page>, start: u64, length: usize) -> bool {
         let page_size = PAGE_SIZE as u64;
 
         let aligned_start = start / page_size;
@@ -235,7 +494,7 @@ impl<O: Order> ConcolicState<O> {
         false
     }
 
-    fn size_of_concrete_region(pages: &HashMap<u64, Page>, start: u64, length: usize) -> usize {
+    fn size_of_concrete_region(pages: &BTreeMap<u64, Page>, start: u64, length: usize) -> usize {
         let page_size = PAGE_SIZE as u64;
 
         let aligned_start = start / page_size;
@@ -304,8 +563,14 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
-    pub fn concretise_operand_with<T: IntoStateValues<u8>>(&mut self, operand: &Operand, value: T) -> Result<(), Error> {
-        self.concrete.set_operand(operand, value).map_err(Error::state)?;
+    pub fn concretise_operand_with<T: IntoStateValues<u8>>(
+        &mut self,
+        operand: &Operand,
+        value: T,
+    ) -> Result<(), Error> {
+        self.concrete
+            .set_operand(operand, value)
+            .map_err(Error::state)?;
         match operand {
             Operand::Address { value, size } => {
                 Self::concretise(&mut self.pages, value.offset(), *size)
@@ -325,7 +590,7 @@ impl<O: Order> ConcolicState<O> {
         self.temporaries.clear()
     }
 
-    fn concretise(pages: &mut HashMap<u64, Page>, start: u64, length: usize) {
+    fn concretise(pages: &mut BTreeMap<u64, Page>, start: u64, length: usize) {
         let page_size = PAGE_SIZE as u64;
 
         let aligned_start = start / page_size;
@@ -356,10 +621,7 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
-    pub fn read_register_buffer(
-        &self,
-        register: &Register,
-    ) -> Result<Option<Expr>, Error> {
+    pub fn read_register_buffer(&self, register: &Register) -> Result<Option<Expr>, Error> {
         let start = register.offset();
         let length = register.size();
         Self::read_buffer(&self.registers, self.concrete.registers(), start, length)
@@ -367,11 +629,7 @@ impl<O: Order> ConcolicState<O> {
             .map_err(Error::state)
     }
 
-    pub fn read_memory_buffer(
-        &self,
-        start: Address,
-        length: usize,
-    ) -> Result<Option<Expr>, Error> {
+    pub fn read_memory_buffer(&self, start: Address, length: usize) -> Result<Option<Expr>, Error> {
         let start = u64::from(start);
         Self::read_buffer(&self.pages, self.concrete.memory(), start, length)
             .map_err(PCodeError::Memory)
@@ -379,8 +637,8 @@ impl<O: Order> ConcolicState<O> {
     }
 
     // Treat byte range as a contiguous buffer
-    fn read_buffer<T: StateOps<Value=u8>>(
-        pages: &HashMap<u64, Page>,
+    fn read_buffer<T: StateOps<Value = u8>>(
+        pages: &BTreeMap<u64, Page>,
         concs: &T,
         start: u64,
         length: usize,
@@ -448,10 +706,7 @@ impl<O: Order> ConcolicState<O> {
         Ok(expr)
     }
 
-    pub fn read_register_bytes(
-        &self,
-        register: &Register,
-    ) -> Result<Vec<Expr>, Error> {
+    pub fn read_register_bytes(&self, register: &Register) -> Result<Vec<Expr>, Error> {
         let start = register.offset();
         let length = register.size();
         Self::read_bytes(&self.registers, self.concrete.registers(), start, length)
@@ -459,35 +714,27 @@ impl<O: Order> ConcolicState<O> {
             .map_err(Error::state)
     }
 
-    pub fn read_memory_bytes(
-        &self,
-        start: Address,
-        length: usize,
-    ) -> Result<Vec<Expr>, Error> {
+    pub fn read_memory_bytes(&self, start: Address, length: usize) -> Result<Vec<Expr>, Error> {
         let start = u64::from(start);
         Self::read_bytes(&self.pages, self.concrete.memory(), start, length)
             .map_err(PCodeError::Memory)
             .map_err(Error::state)
     }
 
-    pub fn read_temporary_bytes(
-        &self,
-        start: u64,
-        length: usize,
-    ) -> Result<Vec<Expr>, Error> {
-        Self::read_bytes(&self.temporaries, self.concrete.temporaries(), start, length)
-            .map_err(PCodeError::Temporary)
-            .map_err(Error::state)
+    pub fn read_temporary_bytes(&self, start: u64, length: usize) -> Result<Vec<Expr>, Error> {
+        Self::read_bytes(
+            &self.temporaries,
+            self.concrete.temporaries(),
+            start,
+            length,
+        )
+        .map_err(PCodeError::Temporary)
+        .map_err(Error::state)
     }
 
-    pub fn read_operand_bytes(
-        &self,
-        operand: &Operand,
-    ) -> Result<Vec<Expr>, Error> {
+    pub fn read_operand_bytes(&self, operand: &Operand) -> Result<Vec<Expr>, Error> {
         match operand {
-            Operand::Address { value, size } => {
-                self.read_memory_bytes(value.into(), *size)
-            },
+            Operand::Address { value, size } => self.read_memory_bytes(value.into(), *size),
             Operand::Constant { size, value, .. } => {
                 let value = *value;
                 let mut buf = [0u8; 8];
@@ -495,26 +742,27 @@ impl<O: Order> ConcolicState<O> {
                 value.into_bytes::<O>(&mut buf);
 
                 let bufr = if O::ENDIAN.is_big() {
-                    &buf[8-size..]
+                    &buf[8 - size..]
                 } else {
                     &buf[..*size]
                 };
 
-                Ok(bufr.iter().map(|b| BitVec::from(*b).into()).collect::<Vec<_>>())
-            },
+                Ok(bufr
+                    .iter()
+                    .map(|b| BitVec::from(*b).into())
+                    .collect::<Vec<_>>())
+            }
             Operand::Register { .. } => {
                 let register = operand.register().unwrap();
                 self.read_register_bytes(&register)
-            },
-            Operand::Variable { offset, size, .. } => {
-                self.read_temporary_bytes(*offset, *size)
-            },
+            }
+            Operand::Variable { offset, size, .. } => self.read_temporary_bytes(*offset, *size),
         }
     }
 
     // Treat each byte in the range as a separate entity
-    fn read_bytes<T: StateOps<Value=u8>>(
-        pages: &HashMap<u64, Page>,
+    fn read_bytes<T: StateOps<Value = u8>>(
+        pages: &BTreeMap<u64, Page>,
         concs: &T,
         start: u64,
         length: usize,
@@ -571,8 +819,8 @@ impl<O: Order> ConcolicState<O> {
         Ok(exprs)
     }
 
-    fn copy_mixed_byte_page<T: StateOps<Value=u8>>(
-        pages: &mut HashMap<u64, Page>,
+    fn copy_mixed_byte_page<T: StateOps<Value = u8>>(
+        pages: &mut BTreeMap<u64, Page>,
         concs: &mut T,
         from_sym: &[Option<Expr>],
         from_con: &[u8],
@@ -595,8 +843,7 @@ impl<O: Order> ConcolicState<O> {
             if sym_range.iter().any(Option::is_some) {
                 // range contains symbolic
                 let page = pages.entry(aligned).or_insert_with(Page::new);
-                let cview = concs
-                    .view_values_mut(to, this_length)?;
+                let cview = concs.view_values_mut(to, this_length)?;
                 let sview = page.view_mut(aligned_off, this_length);
                 for (i, (s, c)) in sym_range.iter().zip(con_range).enumerate() {
                     if s.is_some() {
@@ -627,8 +874,7 @@ impl<O: Order> ConcolicState<O> {
             if sym_range.iter().any(Option::is_some) {
                 // range contains symbolic
                 let page = pages.entry(aligned).or_insert_with(Page::new);
-                let cview = concs
-                    .view_values_mut(to + written as u64, this_length)?;
+                let cview = concs.view_values_mut(to + written as u64, this_length)?;
                 let sview = page.view_mut(0, this_length);
                 for (i, (s, c)) in sym_range.iter().zip(con_range).enumerate() {
                     if s.is_some() {
@@ -643,22 +889,21 @@ impl<O: Order> ConcolicState<O> {
                     // we clear the range to concretise it
                     page.clear(0, this_length)
                 }
-                concs
-                    .set_values(to + written as u64, con_range)?;
+                concs.set_values(to + written as u64, con_range)?;
             }
         }
 
         Ok(())
     }
 
-    fn copy_mixed_bytes_forward<T: StateOps<Value=u8>>(
-        pages: &mut HashMap<u64, Page>,
+    fn copy_mixed_bytes_forward<T: StateOps<Value = u8>>(
+        pages: &mut BTreeMap<u64, Page>,
         concs: &mut T,
         from: u64,
         to: u64,
         length: usize,
     ) -> Result<(), T::Error> {
-        let mut symbolic_page: [Option<Expr>; PAGE_SIZE] = Page::default().into();
+        let mut symbolic_page: Box<[Option<Expr>]> = Page::default().into();
         let mut concrete_page = [0u8; PAGE_SIZE];
 
         let page_size = PAGE_SIZE as u64;
@@ -695,10 +940,7 @@ impl<O: Order> ConcolicState<O> {
 
                 // get concrete range
                 let con_range = &mut concrete_page[offset..offset + length];
-                con_range.copy_from_slice(
-                    concs
-                        .view_values(page + offset as u64, length)?
-                );
+                con_range.copy_from_slice(concs.view_values(page + offset as u64, length)?);
 
                 Self::copy_mixed_byte_page(pages, concs, sym_range, con_range, to + written)?;
             } else {
@@ -710,10 +952,7 @@ impl<O: Order> ConcolicState<O> {
 
                 // get concrete range
                 let con_range = &mut concrete_page[offset..offset + length];
-                con_range.copy_from_slice(
-                    concs
-                        .view_values(page + offset as u64, length)?
-                );
+                con_range.copy_from_slice(concs.view_values(page + offset as u64, length)?);
 
                 Self::copy_mixed_byte_page(pages, concs, sym_range, con_range, to + written)?;
             }
@@ -723,14 +962,14 @@ impl<O: Order> ConcolicState<O> {
         Ok(())
     }
 
-    fn copy_mixed_bytes_backward<T: StateOps<Value=u8>>(
-        pages: &mut HashMap<u64, Page>,
+    fn copy_mixed_bytes_backward<T: StateOps<Value = u8>>(
+        pages: &mut BTreeMap<u64, Page>,
         concs: &mut T,
         from: u64,
         to: u64,
         length: usize,
     ) -> Result<(), T::Error> {
-        let mut symbolic_page: [Option<Expr>; PAGE_SIZE] = Page::default().into();
+        let mut symbolic_page: Box<[Option<Expr>]> = Page::default().into();
         let mut concrete_page = [0u8; PAGE_SIZE];
 
         let page_size = PAGE_SIZE as u64;
@@ -768,10 +1007,7 @@ impl<O: Order> ConcolicState<O> {
 
                 // get concrete range
                 let con_range = &mut concrete_page[offset..offset + length];
-                con_range.copy_from_slice(
-                    concs
-                        .view_values(page + offset as u64, length)?
-                );
+                con_range.copy_from_slice(concs.view_values(page + offset as u64, length)?);
 
                 Self::copy_mixed_byte_page(
                     pages,
@@ -789,10 +1025,7 @@ impl<O: Order> ConcolicState<O> {
 
                 // get concrete range
                 let con_range = &mut concrete_page[offset..offset + length];
-                con_range.copy_from_slice(
-                    concs
-                        .view_values(page + offset as u64, length)?
-                );
+                con_range.copy_from_slice(concs.view_values(page + offset as u64, length)?);
 
                 Self::copy_mixed_byte_page(
                     pages,
@@ -822,9 +1055,21 @@ impl<O: Order> ConcolicState<O> {
         let taligned_start = to / page_size;
 
         if taligned_start >= faligned_start && taligned_start <= faligned_end {
-            Self::copy_mixed_bytes_backward(&mut self.pages, self.concrete.memory_mut(), from, to, length)
+            Self::copy_mixed_bytes_backward(
+                &mut self.pages,
+                self.concrete.memory_mut(),
+                from,
+                to,
+                length,
+            )
         } else {
-            Self::copy_mixed_bytes_forward(&mut self.pages, self.concrete.memory_mut(), from, to, length)
+            Self::copy_mixed_bytes_forward(
+                &mut self.pages,
+                self.concrete.memory_mut(),
+                from,
+                to,
+                length,
+            )
         }
         .map_err(PCodeError::Memory)
         .map_err(Error::state)
@@ -850,27 +1095,19 @@ impl<O: Order> ConcolicState<O> {
 
     pub fn write_operand_bytes<I: IntoIterator<Item = Expr>>(&mut self, operand: &Operand, it: I) {
         match operand {
-            Operand::Address { value, .. } => {
-                self.write_memory_bytes(value.into(), it)
-            },
+            Operand::Address { value, .. } => self.write_memory_bytes(value.into(), it),
             Operand::Register { .. } => {
                 let register = operand.register().unwrap();
                 self.write_register_bytes(&register, it)
-            },
-            Operand::Variable { offset, .. } => {
-                self.write_temporary_bytes(*offset, it)
-            },
+            }
+            Operand::Variable { offset, .. } => self.write_temporary_bytes(*offset, it),
             _ => {
                 panic!("write to constant: {}", operand)
             }
         }
     }
 
-    fn write_bytes<I: IntoIterator<Item = Expr>>(
-        pages: &mut HashMap<u64, Page>,
-        at: u64,
-        it: I,
-    ) {
+    fn write_bytes<I: IntoIterator<Item = Expr>>(pages: &mut BTreeMap<u64, Page>, at: u64, it: I) {
         let page_size = PAGE_SIZE as u64;
 
         let mut it = it.into_iter();
@@ -911,28 +1148,22 @@ impl<O: Order> ConcolicState<O> {
             .map_err(Error::state)
     }
 
-    pub fn read_memory_primitive<T: ByteCast>(
-        &self,
-        at: Address,
-    ) -> Result<Option<Expr>, Error> {
+    pub fn read_memory_primitive<T: ByteCast>(&self, at: Address) -> Result<Option<Expr>, Error> {
         let start = u64::from(at);
         Self::read_primitive::<T, _>(&self.pages, self.concrete.memory(), start)
             .map_err(PCodeError::Memory)
             .map_err(Error::state)
     }
 
-    pub fn read_temporary_primitive<T: ByteCast>(
-        &self,
-        at: u64,
-    ) -> Result<Option<Expr>, Error> {
+    pub fn read_temporary_primitive<T: ByteCast>(&self, at: u64) -> Result<Option<Expr>, Error> {
         Self::read_primitive::<T, _>(&self.temporaries, self.concrete.temporaries(), at)
             .map_err(PCodeError::Temporary)
             .map_err(Error::state)
     }
 
     // Read a primitive using a given endianness
-    fn read_primitive<T: ByteCast, S: StateOps<Value=u8>>(
-        pages: &HashMap<u64, Page>,
+    fn read_primitive<T: ByteCast, S: StateOps<Value = u8>>(
+        pages: &BTreeMap<u64, Page>,
         concs: &S,
         at: u64,
     ) -> Result<Option<Expr>, S::Error> {
@@ -944,37 +1175,21 @@ impl<O: Order> ConcolicState<O> {
         })
     }
 
-    pub fn write_register_primitive<T: ByteCast>(
-        &mut self,
-        register: &Register,
-        expr: Expr,
-    ) {
+    pub fn write_register_primitive<T: ByteCast>(&mut self, register: &Register, expr: Expr) {
         let start = register.offset();
         Self::write_primitive::<T>(&mut self.registers, start, expr)
     }
 
-    pub fn write_memory_primitive<T: ByteCast>(
-        &mut self,
-        at: Address,
-        expr: Expr,
-    ) {
+    pub fn write_memory_primitive<T: ByteCast>(&mut self, at: Address, expr: Expr) {
         let start = u64::from(at);
         Self::write_primitive::<T>(&mut self.pages, start, expr)
     }
 
-    pub fn write_temporary_primitive<T: ByteCast>(
-        &mut self,
-        at: u64,
-        expr: Expr,
-    ) {
+    pub fn write_temporary_primitive<T: ByteCast>(&mut self, at: u64, expr: Expr) {
         Self::write_primitive::<T>(&mut self.temporaries, at, expr)
     }
 
-    fn write_primitive<T: ByteCast>(
-        pages: &mut HashMap<u64, Page>,
-        at: u64,
-        expr: Expr,
-    ) {
+    fn write_primitive<T: ByteCast>(pages: &mut BTreeMap<u64, Page>, at: u64, expr: Expr) {
         let size = expr.bits();
         let bits = T::SIZEOF * 8;
 
@@ -993,37 +1208,21 @@ impl<O: Order> ConcolicState<O> {
         Self::write_expr(pages, at, expr)
     }
 
-    pub fn write_register_expr(
-        &mut self,
-        register: &Register,
-        expr: Expr,
-    ) {
+    pub fn write_register_expr(&mut self, register: &Register, expr: Expr) {
         let start = register.offset();
         Self::write_expr(&mut self.registers, start, expr)
     }
 
-    pub fn write_memory_expr(
-        &mut self,
-        at: Address,
-        expr: Expr,
-    ) {
+    pub fn write_memory_expr(&mut self, at: Address, expr: Expr) {
         let start = u64::from(at);
         Self::write_expr(&mut self.pages, start, expr)
     }
 
-    pub fn write_temporary_expr(
-        &mut self,
-        at: u64,
-        expr: Expr,
-    ) {
+    pub fn write_temporary_expr(&mut self, at: u64, expr: Expr) {
         Self::write_expr(&mut self.temporaries, at, expr)
     }
 
-    pub fn write_operand_expr(
-        &mut self,
-        operand: &Operand,
-        expr: Expr,
-    ) {
+    pub fn write_operand_expr(&mut self, operand: &Operand, expr: Expr) {
         assert_eq!(expr.bits(), operand.size() * 8);
         match operand {
             Operand::Address { value, .. } => {
@@ -1039,11 +1238,7 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
-    fn write_expr(
-        pages: &mut HashMap<u64, Page>,
-        at: u64,
-        expr: Expr,
-    ) {
+    fn write_expr(pages: &mut BTreeMap<u64, Page>, at: u64, expr: Expr) {
         debug_assert_eq!(expr.bits() % 8, 0);
         let at = u64::from(at);
         let page_size = PAGE_SIZE as u64;
@@ -1085,7 +1280,11 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
-    pub fn write_operand_value(&mut self, operand: &Operand, value: Either<BitVec, Expr>) -> Result<(), Error> {
+    pub fn write_operand_value(
+        &mut self,
+        operand: &Operand,
+        value: Either<BitVec, Expr>,
+    ) -> Result<(), Error> {
         match value {
             Either::Left(bv) => self.concretise_operand_with(operand, bv),
             Either::Right(expr) => {
@@ -1096,7 +1295,7 @@ impl<O: Order> ConcolicState<O> {
                     self.write_operand_expr(operand, expr);
                 }
                 Ok(())
-            },
+            }
         }
     }
 
@@ -1110,7 +1309,10 @@ impl<O: Order> ConcolicState<O> {
                 Ok(Either::Right(expr))
             }
         } else {
-            let bv = self.concrete.get_operand::<BitVec>(operand).map_err(Error::state)?;
+            let bv = self
+                .concrete
+                .get_operand::<BitVec>(operand)
+                .map_err(Error::state)?;
             Ok(Either::Left(bv))
         }
     }
@@ -1118,9 +1320,14 @@ impl<O: Order> ConcolicState<O> {
     pub fn read_operand_expr(&self, operand: &Operand) -> Result<Expr, Error> {
         let vals = self.read_operand_bytes(operand)?;
         let expr = if O::ENDIAN.is_big() {
-            vals.into_iter().fold1(|acc, v| Expr::concat(acc, v)).unwrap()
+            vals.into_iter()
+                .fold1(|acc, v| Expr::concat(acc, v))
+                .unwrap()
         } else {
-            vals.into_iter().rev().fold1(|acc, v| Expr::concat(acc, v)).unwrap()
+            vals.into_iter()
+                .rev()
+                .fold1(|acc, v| Expr::concat(acc, v))
+                .unwrap()
         };
         Ok(expr)
     }
@@ -1128,9 +1335,14 @@ impl<O: Order> ConcolicState<O> {
     pub fn read_memory_expr(&self, addr: Address, bits: usize) -> Result<Expr, Error> {
         let vals = self.read_memory_bytes(addr, bits / 8)?;
         let expr = if O::ENDIAN.is_big() {
-            vals.into_iter().fold1(|acc, v| Expr::concat(acc, v)).unwrap()
+            vals.into_iter()
+                .fold1(|acc, v| Expr::concat(acc, v))
+                .unwrap()
         } else {
-            vals.into_iter().rev().fold1(|acc, v| Expr::concat(acc, v)).unwrap()
+            vals.into_iter()
+                .rev()
+                .fold1(|acc, v| Expr::concat(acc, v))
+                .unwrap()
         };
         Ok(expr)
     }
@@ -1144,13 +1356,14 @@ impl<O: Order> ConcolicState<O> {
         } else {
             let addrs = addr.solve_many(&mut self.solver, &self.constraints);
             if addrs.is_empty() {
-                return Err(Error::UnsatAddress(addr))
+                return Err(Error::UnsatAddress(addr));
             }
 
             let mut init = Expr::from(BitVec::zero(bits)); // FIXME: we should not default to 0!
             for caddr in addrs {
                 let addrv = caddr.to_u64().expect("64-bit address limit");
-                let cval = self.read_memory_expr(self.solver.translator().address(addrv).into(), bits)?;
+                let cval =
+                    self.read_memory_expr(self.solver.translator().address(addrv).into(), bits)?;
                 let cond = Expr::int_eq(addr.clone(), caddr);
                 init = Expr::ite(cond, cval, init);
             }
@@ -1159,7 +1372,12 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
-    fn write_memory_symbolic_aux(&mut self, aexpr: Expr, addr: Address, texpr: Expr) -> Result<(), Error> {
+    fn write_memory_symbolic_aux(
+        &mut self,
+        aexpr: Expr,
+        addr: Address,
+        texpr: Expr,
+    ) -> Result<(), Error> {
         let abits = aexpr.bits();
         let fexpr = self.read_memory_expr(addr, texpr.bits())?;
 
@@ -1183,7 +1401,8 @@ impl<O: Order> ConcolicState<O> {
                 self.write_memory_symbolic_aux(
                     addr.clone(),
                     self.solver.translator().address(addrv).into(),
-                    expr.clone())?;
+                    expr.clone(),
+                )?;
             }
         }
 
