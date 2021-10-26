@@ -12,6 +12,7 @@ loader-radare = ["fuguex/loader-radare"]
 
 [dependencies]
 boolector = "0.4"
+boolector-sys = { version = "0.6.3", features = ["vendor-lgl"] }
 dyn-clone = "1"
 either = "1"
 fnv = "1"
