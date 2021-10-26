@@ -7,7 +7,6 @@ use fugue::bytes::Order;
 use fugue::fp::{self, float_format_from_size, Float, FloatFormat, FloatFormatOps};
 use fugue::ir::{Address, AddressSpace, AddressValue, IntoAddress, Translator};
 use fugue::ir::disassembly::ContextDatabase;
-use fugue::ir::il::ecode::Expr;
 use fugue::ir::il::pcode::Operand;
 
 use fnv::FnvHashMap as HashMap;
@@ -23,6 +22,7 @@ use parking_lot::RwLock;
 
 use thiserror::Error;
 
+use crate::expr::SymExpr;
 use crate::hooks::ClonableHookConcolic;
 use crate::state::{ConcolicState, Error as StateError};
 use crate::value::Value;
@@ -171,7 +171,7 @@ impl ToSignedBytes for BitVec {
     }
 }
 
-impl ToSignedBytes for Expr {
+impl ToSignedBytes for SymExpr {
     fn expand_as<O: Order, const OPERAND_SIZE: usize>(
         self,
         ctxt: &mut ConcolicContext<O, { OPERAND_SIZE }>,
@@ -184,16 +184,16 @@ impl ToSignedBytes for Expr {
             return Err(Error::UnsupportedOperandSize(size, OPERAND_SIZE));
         }
 
-        let dbits = size << 3;
+        let dbits = (size as u32) << 3;
         let target = if signed {
-            Expr::cast_signed(self, dbits)
+            SymExpr::sign_extend(self, dbits)
         } else if self.bits() != dbits {
-            Expr::cast_unsigned(self, dbits)
+            SymExpr::zero_extend(self, dbits)
         } else {
             self
         };
 
-        let expr = Either::Right(target);
+        let expr = Either::<BitVec, _>::Right(target);
 
         ctxt.state.write_operand_value(dest, expr.clone())?;
 
@@ -245,7 +245,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         self.hooks.push(Box::new(hook));
     }
 
-    pub fn push_constraint(&mut self, constraint: Expr) {
+    pub fn push_constraint(&mut self, constraint: SymExpr) {
         self.state.push_constraint(constraint);
     }
 
@@ -257,9 +257,9 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         &mut self.state
     }
 
-    pub fn branch_expr(state: &mut ConcolicState<O>, expr: Expr) -> Result<NextLocation<O>, Error> {
+    pub fn branch_expr(state: &mut ConcolicState<O>, expr: SymExpr) -> Result<NextLocation<O>, Error> {
         let mut states = Vec::new();
-        let value = expr.simplify(&state.solver);
+        let value = expr.simplify();
 
         let solns = value.solve_many(&mut state.solver, &state.constraints);
 
@@ -268,7 +268,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             let location = Branch::Global(address);
 
             let mut fork = state.fork();
-            fork.push_constraint(Expr::int_eq(val, value.clone()));
+            fork.push_constraint(SymExpr::eq(val.into(), value.clone()));
 
             if fork.is_sat() {
                 states.push((location, fork));
@@ -308,7 +308,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         }
     }
 
-    fn get_address(&mut self, source: &Operand) -> Result<Either<AddressValue, Expr>, Error> {
+    fn get_address(&mut self, source: &Operand) -> Result<Either<AddressValue, SymExpr>, Error> {
         match self.state.read_operand_value(source)? {
             Either::Left(bv) => {
                 let offset = bv
@@ -324,7 +324,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
 
     fn with_return_location<U, F>(&mut self, f: F) -> Result<U, Error>
     where
-        F: FnOnce(&mut ConcolicState<O>, Either<Operand, Expr>) -> Result<U, Error>,
+        F: FnOnce(&mut ConcolicState<O>, Either<Operand, SymExpr>) -> Result<U, Error>,
     {
         let rloc = self.state.concrete.registers().return_location().clone();
         match rloc {
@@ -342,7 +342,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
                     },
                     Either::Right(expr) => {
                         let offset = BitVec::from_u64(offset, self.interpreter_space().address_size());
-                        let aexpr = Expr::int_add(expr, offset);
+                        let aexpr = SymExpr::add(expr, offset.into());
                         f(&mut self.state, Either::Right(aexpr))
                     }
                 }
@@ -372,7 +372,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
                     self.state.concretise_operand_with(&stack_pointer, address)?;
                 },
                 Either::Right(expr) => {
-                    let address = Expr::int_add(expr, BitVec::from_u64(extra_pop, bits));
+                    let address = SymExpr::add(expr, BitVec::from_u64(extra_pop, bits).into());
                     self.state.write_operand_value(&stack_pointer, Either::Right(address))?;
                 },
             }
@@ -390,7 +390,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     ) -> Result<Outcome<Outcomes<O>>, Error>
     where
         COC: FnOnce(bool) -> Result<COCO, Error>,
-        COS: FnOnce(Expr) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -406,7 +406,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
 
         let value = match self.state.read_operand_value(rhs)? {
             Either::Left(bv) => Either::Left(opc(!bv.is_zero())?),
-            Either::Right(expr) => Either::Right(ops(Expr::cast_bool(expr))?),
+            Either::Right(expr) => Either::Right(ops(SymExpr::cast_bool(expr))?),
         };
 
         value.expand_as(self, dest, false)?;
@@ -424,7 +424,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     ) -> Result<Outcome<Outcomes<O>>, Error>
     where
         COC: FnOnce(bool, bool) -> Result<COCO, Error>,
-        COS: FnOnce(Expr, Expr) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr, SymExpr) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -447,7 +447,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         let lhs_val = self
             .state
             .read_operand_value(lhs)?
-            .map_right(|expr| Expr::cast_bool(expr));
+            .map_right(|expr| SymExpr::cast_bool(expr));
 
         for hook in self.hooks.iter_mut() {
             hook.hook_operand_read(&mut self.state, rhs)
@@ -457,7 +457,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         let rhs_val = self
             .state
             .read_operand_value(rhs)?
-            .map_right(|expr| Expr::cast_bool(expr));
+            .map_right(|expr| SymExpr::cast_bool(expr));
 
         let value = match (lhs_val, rhs_val) {
             (Either::Left(bv1), Either::Left(bv2)) => {
@@ -483,7 +483,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     ) -> Result<Outcome<Outcomes<O>>, Error>
     where
         COC: FnOnce(BitVec) -> Result<COCO, Error>,
-        COS: FnOnce(Expr) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -502,7 +502,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             Either::Right(expr) => {
                 let bits = expr.bits();
                 Either::Right(ops(if signed {
-                    Expr::cast_signed(expr, bits)
+                    SymExpr::sign_extend(expr, bits)
                 } else {
                     expr
                 })?)
@@ -525,7 +525,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     ) -> Result<Outcome<Outcomes<O>>, Error>
     where
         COC: FnOnce(BitVec, BitVec) -> Result<COCO, Error>,
-        COS: FnOnce(Expr, Expr) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr, SymExpr) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -553,7 +553,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             .map_left(|bv| bv.signed())
             .map_right(|expr| {
                 let bits = expr.bits();
-                Expr::cast_signed(expr, bits)
+                SymExpr::sign_extend(expr, bits)
             });
 
         for hook in self.hooks.iter_mut() {
@@ -573,9 +573,9 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             })
             .map_right(|expr| {
                 if signed {
-                    Expr::cast_signed(expr, lbits)
+                    SymExpr::sign_extend(expr, lbits as u32)
                 } else {
-                    Expr::cast_unsigned(expr, lbits)
+                    SymExpr::zero_extend(expr, lbits as u32)
                 }
             });
 
@@ -600,7 +600,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     ) -> Result<Outcome<Outcomes<O>>, Error>
     where
         COC: FnOnce(Float, &FloatFormat) -> Result<COCO, Error>,
-        COS: FnOnce(Expr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -620,7 +620,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
             Either::Left(bv) => Either::Left(opc(format.from_bitvec(&bv), &format)?),
             Either::Right(expr) => {
                 let formats = self.state.solver.translator.float_formats();
-                Either::Right(ops(Expr::cast_float(expr, Arc::new(format)), formats)?)
+                Either::Right(ops(SymExpr::cast_float(expr, Arc::new(format)), formats)?)
             }
         };
 
@@ -639,7 +639,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     ) -> Result<Outcome<Outcomes<O>>, Error>
     where
         COC: FnOnce(Float, Float, &FloatFormat) -> Result<COCO, Error>,
-        COS: FnOnce(Expr, Expr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr, SymExpr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -666,7 +666,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         let lhs_val = self
             .state
             .read_operand_value(lhs)?
-            .map_right(|expr| Expr::cast_float(expr, format.clone()));
+            .map_right(|expr| SymExpr::cast_float(expr, format.clone()));
 
         for hook in self.hooks.iter_mut() {
             hook.hook_operand_read(&mut self.state, rhs)
@@ -676,7 +676,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         let rhs_val = self
             .state
             .read_operand_value(rhs)?
-            .map_right(|expr| Expr::cast_float(expr, format.clone()));
+            .map_right(|expr| SymExpr::cast_float(expr, format.clone()));
 
         let formats = self.state.solver.translator.float_formats();
         let value = match (lhs_val, rhs_val) {
@@ -686,10 +686,10 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
                 &format,
             )?),
             (Either::Left(bv), Either::Right(se)) => {
-                Either::Right(ops(Expr::cast_float(bv, format.clone()), se, formats)?)
+                Either::Right(ops(SymExpr::cast_float(bv.into(), format.clone()), se, formats)?)
             }
             (Either::Right(se), Either::Left(bv)) => {
-                Either::Right(ops(se, Expr::cast_float(bv, format.clone()), formats)?)
+                Either::Right(ops(se, SymExpr::cast_float(bv.into(), format.clone()), formats)?)
             }
             (Either::Right(se1), Either::Right(se2)) => Either::Right(ops(se1, se2, formats)?),
         };
@@ -769,10 +769,10 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                 let mut tstate = self.state.fork();
                 let mut fstate = self.state.fork();
 
-                tstate.push_constraint(Expr::bool_eq(expr.clone(), BitVec::one(8)));
+                tstate.push_constraint(SymExpr::bool_eq(expr.clone(), BitVec::one(8).into()));
                 let tsat = tstate.is_sat();
 
-                fstate.push_constraint(Expr::bool_eq(expr, BitVec::zero(8)));
+                fstate.push_constraint(SymExpr::bool_eq(expr, BitVec::zero(8).into()));
                 let fsat = fstate.is_sat();
 
                 let states = match (tsat, fsat) {
@@ -942,14 +942,14 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             Either::Right(expr) => {
                 let bits = expr.bits();
                 let addr = {
-                    let off = Expr::int_mul(expr, BitVec::from_u64(space_word_size, bits));
+                    let off = SymExpr::mul(expr, BitVec::from_u64(space_word_size, bits as usize).into());
                     let msk = BitVec::from_u64(
                         1u64.checked_shl(space_size.checked_shl(3).unwrap_or(0) as u32)
                             .unwrap_or(0)
                             .wrapping_sub(1),
-                        bits,
+                        bits as usize,
                     );
-                    Expr::int_and(off, msk)
+                    SymExpr::and(off, msk.into())
                 };
 
                 let value = self
@@ -1006,20 +1006,20 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             Either::Right(expr) => {
                 let bits = expr.bits();
                 let addr = {
-                    let off = Expr::int_mul(expr, BitVec::from_u64(space_word_size, bits));
+                    let off = SymExpr::mul(expr, BitVec::from_u64(space_word_size, bits as usize).into());
                     let msk = BitVec::from_u64(
                         1u64.checked_shl(space_size.checked_shl(3).unwrap_or(0) as u32)
                             .unwrap_or(0)
                             .wrapping_sub(1),
-                        bits,
+                        bits as usize,
                     );
-                    Expr::int_and(off, msk)
+                    SymExpr::and(off, msk.into())
                 };
 
                 let value = self
                     .state
                     .read_operand_value(source)?
-                    .either(|bv| Expr::from(bv), |expr| expr);
+                    .either(|bv| SymExpr::from(bv), |expr| expr);
 
                 self.state.write_memory_symbolic(&addr, value)?;
 
@@ -1036,7 +1036,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Error> {
         self.lift_int2(
             |u, v| Ok(u == v),
-            |u, v| Ok(Expr::int_eq(u, v)),
+            |u, v| Ok(SymExpr::eq(u, v)),
             destination,
             operand1,
             operand2,
@@ -1052,7 +1052,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u != v),
-            |u, v| Ok(Expr::int_neq(u, v)),
+            |u, v| Ok(SymExpr::ne(u, v)),
             destination,
             operand1,
             operand2,
@@ -1068,7 +1068,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u < v),
-            |u, v| Ok(Expr::int_lt(u, v)),
+            |u, v| Ok(SymExpr::lt(u, v)),
             destination,
             operand1,
             operand2,
@@ -1084,7 +1084,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u <= v),
-            |u, v| Ok(Expr::int_le(u, v)),
+            |u, v| Ok(SymExpr::le(u, v)),
             destination,
             operand1,
             operand2,
@@ -1100,7 +1100,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u < v),
-            |u, v| Ok(Expr::int_slt(u, v)),
+            |u, v| Ok(SymExpr::slt(u, v)),
             destination,
             operand1,
             operand2,
@@ -1116,7 +1116,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u <= v),
-            |u, v| Ok(Expr::int_sle(u, v)),
+            |u, v| Ok(SymExpr::sle(u, v)),
             destination,
             operand1,
             operand2,
@@ -1148,7 +1148,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u + v),
-            |u, v| Ok(Expr::int_add(u, v)),
+            |u, v| Ok(SymExpr::add(u, v)),
             destination,
             operand1,
             operand2,
@@ -1164,7 +1164,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u - v),
-            |u, v| Ok(Expr::int_sub(u, v)),
+            |u, v| Ok(SymExpr::sub(u, v)),
             destination,
             operand1,
             operand2,
@@ -1180,7 +1180,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u.carry(&v)),
-            |u, v| Ok(Expr::int_carry(u, v)),
+            |u, v| Ok(SymExpr::carry(u, v)),
             destination,
             operand1,
             operand2,
@@ -1196,7 +1196,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u.signed_carry(&v)),
-            |u, v| Ok(Expr::int_scarry(u, v)),
+            |u, v| Ok(SymExpr::signed_carry(u, v)),
             destination,
             operand1,
             operand2,
@@ -1212,7 +1212,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u.signed_borrow(&v)),
-            |u, v| Ok(Expr::int_sborrow(u, v)),
+            |u, v| Ok(SymExpr::signed_borrow(u, v)),
             destination,
             operand1,
             operand2,
@@ -1227,7 +1227,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int1(
             |u| Ok(-u),
-            |u| Ok(Expr::int_neg(u)),
+            |u| Ok(SymExpr::neg(u)),
             destination,
             operand,
             true,
@@ -1241,7 +1241,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int1(
             |u| Ok(!u),
-            |u| Ok(Expr::int_not(u)),
+            |u| Ok(SymExpr::not(u)),
             destination,
             operand,
             false,
@@ -1256,7 +1256,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u ^ v),
-            |u, v| Ok(Expr::int_xor(u, v)),
+            |u, v| Ok(SymExpr::xor(u, v)),
             destination,
             operand1,
             operand2,
@@ -1272,7 +1272,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u & v),
-            |u, v| Ok(Expr::int_and(u, v)),
+            |u, v| Ok(SymExpr::and(u, v)),
             destination,
             operand1,
             operand2,
@@ -1288,7 +1288,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u | v),
-            |u, v| Ok(Expr::int_or(u, v)),
+            |u, v| Ok(SymExpr::or(u, v)),
             destination,
             operand1,
             operand2,
@@ -1304,7 +1304,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u << v),
-            |u, v| Ok(Expr::int_shl(u, v)),
+            |u, v| Ok(SymExpr::shl(u, v)),
             destination,
             operand1,
             operand2,
@@ -1320,7 +1320,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u >> v),
-            |u, v| Ok(Expr::int_shr(u, v)),
+            |u, v| Ok(SymExpr::shr(u, v)),
             destination,
             operand1,
             operand2,
@@ -1336,7 +1336,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u >> v),
-            |u, v| Ok(Expr::int_sar(u, v)),
+            |u, v| Ok(SymExpr::signed_shr(u, v)),
             destination,
             operand1,
             operand2,
@@ -1352,7 +1352,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int2(
             |u, v| Ok(u * v),
-            |u, v| Ok(Expr::int_mul(u, v)),
+            |u, v| Ok(SymExpr::mul(u, v)),
             destination,
             operand1,
             operand2,
@@ -1374,7 +1374,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                     Ok(u / v)
                 }
             },
-            |u, v| Ok(Expr::int_div(u, v)),
+            |u, v| Ok(SymExpr::div(u, v)),
             destination,
             operand1,
             operand2,
@@ -1396,7 +1396,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                     Ok(u / v)
                 }
             },
-            |u, v| Ok(Expr::int_sdiv(u, v)),
+            |u, v| Ok(SymExpr::signed_div(u, v)),
             destination,
             operand1,
             operand2,
@@ -1418,7 +1418,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                     Ok(u % v)
                 }
             },
-            |u, v| Ok(Expr::int_rem(u, v)),
+            |u, v| Ok(SymExpr::rem(u, v)),
             destination,
             operand1,
             operand2,
@@ -1440,7 +1440,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                     Ok(u % v)
                 }
             },
-            |u, v| Ok(Expr::int_srem(u, v)),
+            |u, v| Ok(SymExpr::signed_rem(u, v)),
             destination,
             operand1,
             operand2,
@@ -1453,7 +1453,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
         destination: &Operand,
         operand: &Operand,
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
-        self.lift_bool1(|u| Ok(!u), |u| Ok(Expr::bool_not(u)), destination, operand)
+        self.lift_bool1(|u| Ok(!u), |u| Ok(SymExpr::bool_not(u)), destination, operand)
     }
 
     fn bool_xor(
@@ -1464,7 +1464,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_bool2(
             |u, v| Ok(u ^ v),
-            |u, v| Ok(Expr::bool_xor(u, v)),
+            |u, v| Ok(SymExpr::bool_xor(u, v)),
             destination,
             operand1,
             operand2,
@@ -1479,7 +1479,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_bool2(
             |u, v| Ok(u & v),
-            |u, v| Ok(Expr::bool_and(u, v)),
+            |u, v| Ok(SymExpr::bool_and(u, v)),
             destination,
             operand1,
             operand2,
@@ -1494,7 +1494,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_bool2(
             |u, v| Ok(u | v),
-            |u, v| Ok(Expr::bool_or(u, v)),
+            |u, v| Ok(SymExpr::bool_or(u, v)),
             destination,
             operand1,
             operand2,
@@ -1509,7 +1509,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, _fmt| Ok(u == v),
-            |u, v, fmts| Ok(Expr::float_eq(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_eq(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1524,7 +1524,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, _fmt| Ok(u != v),
-            |u, v, fmts| Ok(Expr::float_neq(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_ne(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1539,7 +1539,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, _fmt| Ok(u < v),
-            |u, v, fmts| Ok(Expr::float_le(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_le(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1554,7 +1554,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, _fmt| Ok(u <= v),
-            |u, v, fmts| Ok(Expr::float_le(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_le(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1568,7 +1568,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, _fmt| Ok(u.is_nan()),
-            |u, fmts| Ok(Expr::float_nan(u, fmts)),
+            |u, fmts| Ok(SymExpr::float_nan(u, fmts)),
             destination,
             operand,
         )
@@ -1582,7 +1582,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, fmt| Ok(fmt.into_bitvec(u + v, fmt.bits())),
-            |u, v, fmts| Ok(Expr::float_add(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_add(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1597,7 +1597,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, fmt| Ok(fmt.into_bitvec(u / v, fmt.bits())),
-            |u, v, fmts| Ok(Expr::float_div(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_div(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1612,7 +1612,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, fmt| Ok(fmt.into_bitvec(u * v, fmt.bits())),
-            |u, v, fmts| Ok(Expr::float_mul(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_mul(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1627,7 +1627,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float2(
             |u, v, fmt| Ok(fmt.into_bitvec(u - v, fmt.bits())),
-            |u, v, fmts| Ok(Expr::float_sub(u, v, fmts)),
+            |u, v, fmts| Ok(SymExpr::float_sub(u, v, fmts)),
             destination,
             operand1,
             operand2,
@@ -1641,7 +1641,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, fmt| Ok(fmt.into_bitvec(-u, fmt.bits())),
-            |u, fmts| Ok(Expr::float_neg(u, fmts)),
+            |u, fmts| Ok(SymExpr::float_neg(u, fmts)),
             destination,
             operand,
         )
@@ -1654,7 +1654,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, fmt| Ok(fmt.into_bitvec(u.abs(), fmt.bits())),
-            |u, fmts| Ok(Expr::float_abs(u, fmts)),
+            |u, fmts| Ok(SymExpr::float_abs(u, fmts)),
             destination,
             operand,
         )
@@ -1667,7 +1667,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, fmt| Ok(fmt.into_bitvec(u.sqrt(), fmt.bits())),
-            |u, fmts| Ok(Expr::float_sqrt(u, fmts)),
+            |u, fmts| Ok(SymExpr::float_sqrt(u, fmts)),
             destination,
             operand,
         )
@@ -1685,7 +1685,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                 let fval = Float::from_bigint(fmt.frac_size, fmt.exp_size, ival);
                 Ok(fmt.into_bitvec(fval, fmt.bits()))
             },
-            |u| Ok(Expr::cast_float(u, fmt.clone())),
+            |u| Ok(SymExpr::cast_float(u, fmt.clone())),
             destination,
             operand,
             true,
@@ -1700,7 +1700,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
         let fmt = float_format_from_size(destination.size())?;
         self.lift_float1(
             |u, fmt| Ok(fmt.into_bitvec(u, fmt.bits())),
-            |u, _fmts| Ok(Expr::cast_float(u, Arc::new(fmt))),
+            |u, _fmts| Ok(SymExpr::cast_float(u, Arc::new(fmt))),
             destination,
             operand,
         )
@@ -1713,7 +1713,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, _fmts| Ok(u.trunc_into_bitvec(destination.size() * 8)),
-            |u, _fmts| Ok(Expr::cast_signed(u, destination.size() * 8)),
+            |u, _fmts| Ok(SymExpr::sign_extend(u, destination.size() as u32 * 8)),
             destination,
             operand,
         )
@@ -1726,7 +1726,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, fmt| Ok(fmt.into_bitvec(u.ceil(), fmt.bits())),
-            |u, fmts| Ok(Expr::float_ceiling(u, fmts)),
+            |u, fmts| Ok(SymExpr::float_ceiling(u, fmts)),
             destination,
             operand,
         )
@@ -1739,7 +1739,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, fmt| Ok(fmt.into_bitvec(u.floor(), fmt.bits())),
-            |u, fmts| Ok(Expr::float_floor(u, fmts)),
+            |u, fmts| Ok(SymExpr::float_floor(u, fmts)),
             destination,
             operand,
         )
@@ -1752,7 +1752,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_float1(
             |u, fmt| Ok(fmt.into_bitvec(u.round(), fmt.bits())),
-            |u, fmts| Ok(Expr::float_round(u, fmts)),
+            |u, fmts| Ok(SymExpr::float_round(u, fmts)),
             destination,
             operand,
         )
@@ -1765,7 +1765,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
         self.lift_int1(
             |u| Ok(BitVec::from(u.count_ones())),
-            |u| Ok(Expr::count_ones(u)),
+            |u| Ok(SymExpr::count_ones(u)),
             destination,
             operand,
             false,
@@ -1820,19 +1820,19 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             },
             Either::Right(expr) => {
                 let src_size = expr.bits();
-                let out_size = destination.size() * 8;
+                let out_size = destination.size() as u32 * 8;
 
-                let loff = amount.offset() as usize * 8;
+                let loff = amount.offset() as u32 * 8;
                 let trun_size = src_size.checked_sub(loff).unwrap_or(0);
 
                 let trun = if out_size > trun_size {
                     // extract high + expand
-                    let source_htrun = Expr::extract_high(expr, trun_size);
-                    Expr::cast_unsigned(source_htrun, out_size)
+                    let source_htrun = SymExpr::extract_high(expr, trun_size);
+                    SymExpr::zero_extend(source_htrun, out_size)
                 } else {
                     // extract
                     let hoff = loff + out_size;
-                    Expr::extract(expr, loff, hoff)
+                    SymExpr::extract(expr, loff, hoff)
                 };
 
                 Either::Right(trun)

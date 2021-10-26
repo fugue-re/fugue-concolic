@@ -3,13 +3,14 @@ use either::Either;
 use fugue::bv::BitVec;
 use fugue::ir::Address;
 use fugue::ir::il::pcode::{Operand, Register};
-use fugue::ir::il::ecode::Expr;
 
 use fuguex::state::State;
 
 use dyn_clone::{DynClone, clone_trait_object};
 
 use fuguex::hooks::types::{Error, HookAction, HookCallAction, HookOutcome};
+
+use crate::expr::SymExpr;
 
 #[allow(unused)]
 pub trait HookConcolic {
@@ -29,7 +30,7 @@ pub trait HookConcolic {
         &mut self,
         state: &mut Self::State,
         address: &Address,
-        value: &Either<BitVec, Expr>,
+        value: &Either<BitVec, SymExpr>,
     ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
         Ok(HookAction::Pass.into())
     }
@@ -46,7 +47,7 @@ pub trait HookConcolic {
         &mut self,
         state: &mut Self::State,
         register: &Register,
-        value: &Either<BitVec, Expr>,
+        value: &Either<BitVec, SymExpr>,
     ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
         Ok(HookAction::Pass.into())
     }
@@ -71,7 +72,7 @@ pub trait HookConcolic {
         &mut self,
         state: &mut Self::State,
         operand: &Operand,
-        value: &Either<BitVec, Expr>,
+        value: &Either<BitVec, SymExpr>,
     ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
         match operand {
             Operand::Address { value: address, .. } => {

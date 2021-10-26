@@ -1,14 +1,11 @@
 use boolector::{BV, BVSolution, Btor, SolverResult};
 
 use fugue::bv::BitVec;
-use fugue::ir::AddressSpace;
-use fugue::ir::il::ecode::{BinOp, BinRel, Cast, Expr, UnOp, UnRel, Var};
-
-use fugue_static::traits::Visit;
-use fugue_static::transforms::egraph::Rewriter;
+use fugue::ir::il::ecode::{BinOp, BinRel, Cast, UnOp, UnRel, Var};
 
 use std::sync::Arc;
 
+use crate::expr::{Expr, SymExpr, VisitRef};
 use crate::solver::SolverContext;
 
 struct ToAst<'c> {
@@ -37,8 +34,8 @@ impl<'c> ToAst<'c> {
     }
 }
 
-impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
-    fn visit_val(&mut self, bv: &'ecode BitVec) {
+impl<'c, 'ecode> VisitRef<'ecode> for ToAst<'c> {
+    fn visit_val_ref(&mut self, bv: &'ecode BitVec) {
         self.value = Some(if bv.bits() <= 64 {
             BV::from_u64(self.solver(), bv.to_u64().unwrap(), bv.bits() as u32)
         } else { // less than ideal...
@@ -53,16 +50,16 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
         });
     }
 
-    fn visit_var(&mut self, var: &'ecode Var) {
+    fn visit_var_ref(&mut self, var: &'ecode Var) {
         self.value = Some(self.var(var));
     }
 
-    fn visit_expr_unrel(&mut self, op: UnRel, _expr: &'ecode Expr) {
+    fn visit_unrel_ref(&mut self, op: UnRel, _expr: &'ecode SymExpr) {
         panic!("unsupported operator: {:?}", op)
     }
 
-    fn visit_expr_unop(&mut self, op: UnOp, expr: &'ecode Expr) {
-        self.visit_expr(expr);
+    fn visit_unop_ref(&mut self, op: UnOp, expr: &'ecode SymExpr) {
+        self.visit_expr_ref(expr);
 
         let value = self.value();
         self.value = Some(match op {
@@ -96,11 +93,11 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
         })
     }
 
-    fn visit_expr_binrel(&mut self, op: BinRel, lexpr: &'ecode Expr, rexpr: &'ecode Expr) {
-        self.visit_expr(lexpr);
+    fn visit_binrel_ref(&mut self, op: BinRel, lexpr: &'ecode SymExpr, rexpr: &'ecode SymExpr) {
+        self.visit_expr_ref(lexpr);
         let lvalue = self.value();
 
-        self.visit_expr(rexpr);
+        self.visit_expr_ref(rexpr);
         let rvalue = self.value();
 
         // NOTE: we uext by 7 to get byte-sized bools
@@ -117,11 +114,11 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
         })
     }
 
-    fn visit_expr_binop(&mut self, op: BinOp, lexpr: &'ecode Expr, rexpr: &'ecode Expr) {
-        self.visit_expr(lexpr);
+    fn visit_binop_ref(&mut self, op: BinOp, lexpr: &'ecode SymExpr, rexpr: &'ecode SymExpr) {
+        self.visit_expr_ref(lexpr);
         let lvalue = self.value();
 
-        self.visit_expr(rexpr);
+        self.visit_expr_ref(rexpr);
         let rvalue = self.value();
 
         let is_bool = lexpr.is_bool() || rexpr.is_bool();
@@ -143,38 +140,38 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
         })
     }
 
-    fn visit_expr_ite(&mut self, cond: &'ecode Expr, texpr: &'ecode Expr, fexpr: &'ecode Expr) {
-        self.visit_expr(cond);
+    fn visit_ite_ref(&mut self, cond: &'ecode SymExpr, texpr: &'ecode SymExpr, fexpr: &'ecode SymExpr) {
+        self.visit_expr_ref(cond);
         let cvalue = self.value();
 
-        self.visit_expr(texpr);
+        self.visit_expr_ref(texpr);
         let lvalue = self.value();
 
-        self.visit_expr(fexpr);
+        self.visit_expr_ref(fexpr);
         let rvalue = self.value();
 
         self.value = Some(cvalue.slice(0, 0).cond_bv(&lvalue, &rvalue))
     }
 
-    fn visit_expr_concat(&mut self, lexpr: &'ecode Expr, rexpr: &'ecode Expr) {
-        self.visit_expr(lexpr);
+    fn visit_concat_ref(&mut self, lexpr: &'ecode SymExpr, rexpr: &'ecode SymExpr) {
+        self.visit_expr_ref(lexpr);
         let lvalue = self.value();
 
-        self.visit_expr(rexpr);
+        self.visit_expr_ref(rexpr);
         let rvalue = self.value();
 
         self.value = Some(lvalue.concat(&rvalue))
     }
 
-    fn visit_expr_extract(&mut self, expr: &'ecode Expr, lsb: usize, msb: usize) {
-        self.visit_expr(&expr);
+    fn visit_extract_ref(&mut self, expr: &'ecode SymExpr, lsb: u32, msb: u32) {
+        self.visit_expr_ref(&expr);
         let value = self.value();
 
-        self.value = Some(value.slice(msb as u32 - 1, lsb as u32))
+        self.value = Some(value.slice(msb - 1, lsb))
     }
 
-    fn visit_expr_cast(&mut self, expr: &'ecode Expr, cast: &'ecode Cast) {
-        self.visit_expr(&expr);
+    fn visit_cast_ref(&mut self, expr: &'ecode SymExpr, cast: &'ecode Cast) {
+        self.visit_expr_ref(&expr);
         let value = self.value();
 
         self.value = Some(match cast {
@@ -184,16 +181,16 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
                 let hbit = expr.bits() as u32;
                 value.slice(hbit - 1, hbit - *bits as u32)
             },
-            Cast::Signed(bits) => if expr.bits() < *bits {
-                value.sext((bits - expr.bits()) as u32)
-            } else if expr.bits() > *bits {
+            Cast::Signed(bits) => if expr.bits() < *bits as u32 {
+                value.sext((*bits as u32 - expr.bits()) as u32)
+            } else if expr.bits() > *bits as u32 {
                 value.slice(*bits as u32 - 1, 0)
             } else {
                 value
             },
-            Cast::Unsigned(bits) => if expr.bits() < *bits {
-                value.uext((bits - expr.bits()) as u32)
-            } else if expr.bits() > *bits {
+            Cast::Unsigned(bits) => if expr.bits() < *bits as u32 {
+                value.uext((*bits as u32 - expr.bits()) as u32)
+            } else if expr.bits() > *bits as u32 {
                 value.slice(*bits as u32 - 1, 0)
             } else {
                 value
@@ -201,39 +198,30 @@ impl<'c, 'ecode> Visit<'ecode> for ToAst<'c> {
             Cast::Float(_) => panic!("unsupported cast: {:?}", cast)
         })
     }
-
-    fn visit_expr_load(&mut self, _expr: &'ecode Expr, _size: usize, _space: &'ecode Arc<AddressSpace>) {
-        panic!("unsupported operation: Expr::Load")
-    }
-
-    fn visit_expr_intrinsic(&mut self, _name: &'ecode str, _args: &'ecode [Box<Expr>], _bits: usize) {
-        panic!("unsupported operation: Expr::Intrinsic")
-    }
 }
 
 pub trait Value {
     fn ast(&self, ctxt: &mut SolverContext) -> BV<Arc<Btor>>;
-    fn simplify(&self, ctxt: &SolverContext) -> Expr;
-    fn solve(&self, ctxt: &mut SolverContext, constraints: &[Expr]) -> Option<BitVec>;
-    fn solve_many(&self, ctxt: &mut SolverContext, constraints: &[Expr]) -> Vec<BitVec>;
+    fn simplify(&self) -> SymExpr;
+    fn solve(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Option<BitVec>;
+    fn solve_many(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Vec<BitVec>;
 }
 
-impl Value for Expr {
+impl Value for SymExpr {
     fn ast(&self, ctxt: &mut SolverContext) -> BV<Arc<Btor>> {
         let mut visitor = ToAst::new(ctxt);
-        visitor.visit_expr(self);
+        visitor.visit_expr_ref(self);
         visitor.value()
     }
 
-    fn simplify(&self, ctxt: &SolverContext) -> Expr {
-        let mut simplifier = Rewriter::new(Default::default());
-        simplifier.simplify_expr(&ctxt.translator, self)
+    fn simplify(&self) -> SymExpr {
+        self.to_owned().simplify()
     }
 
-    fn solve(&self, ctxt: &mut SolverContext, constraints: &[Expr]) -> Option<BitVec> {
-        let nx = self.simplify(ctxt);
-        if let Expr::Val(nx) = nx {
-            Some(nx)
+    fn solve(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Option<BitVec> {
+        let nx = self.simplify();
+        if let Expr::Val(nx) = &*nx {
+            Some(nx.clone())
         } else {
             ctxt.solver.push(1);
 
@@ -258,10 +246,10 @@ impl Value for Expr {
         }
     }
 
-    fn solve_many(&self, ctxt: &mut SolverContext, constraints: &[Expr]) -> Vec<BitVec> {
-        let nx = self.simplify(ctxt);
-        if let Expr::Val(nx) = nx {
-            vec![nx]
+    fn solve_many(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Vec<BitVec> {
+        let nx = self.simplify();
+        if let Expr::Val(nx) = &*nx {
+            vec![nx.clone()]
         } else {
             ctxt.solver().push(1);
 
@@ -287,7 +275,8 @@ impl Value for Expr {
     }
 }
 
-fn bv_from_solution(soln: &BVSolution, bits: usize) -> BitVec {
+fn bv_from_solution(soln: &BVSolution, bits: u32) -> BitVec {
+    let bits = bits as usize;
     let x01 = soln.as_01x_str();
     if let Some(v) = soln.as_u64() {
         BitVec::from_u64(v, bits)

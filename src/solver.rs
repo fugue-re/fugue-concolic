@@ -2,11 +2,12 @@ use boolector::{BV, Btor, SolverResult};
 use boolector::option::{BtorOption, ModelGen};
 
 use fugue::ir::Translator;
-use fugue::ir::il::ecode::{Expr, Var};
+use fugue::ir::il::ecode::Var;
 
 use fxhash::FxHashMap as HashMap;
 use std::sync::Arc;
 
+use crate::expr::SymExpr;
 use crate::value::Value;
 
 const SOLVER_LIMIT: usize = 100;
@@ -54,7 +55,7 @@ impl SolverContext {
         self.translator.clone()
     }
 
-    pub fn is_sat(&mut self, constraints: &[Expr]) -> bool {
+    pub fn is_sat(&mut self, constraints: &[SymExpr]) -> bool {
         constraints.is_empty() || {
             self.solver.push(1);
 
