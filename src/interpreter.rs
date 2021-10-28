@@ -229,7 +229,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         Self {
             hooks: Vec::new(),
             intrinsics: IntrinsicHandler::new(),
-            program_counter: Arc::new(state.registers().program_counter().clone()),
+            program_counter: state.registers().program_counter(),
             state: ConcolicState::new(translator.clone(), state),
             translator_cache: Arc::new(RwLock::new(HashMap::default())),
             translator_context: translator.context_database(),
@@ -326,7 +326,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     where
         F: FnOnce(&mut ConcolicState<O>, Either<Operand, SymExpr>) -> Result<U, Error>,
     {
-        let rloc = self.state.concrete.registers().return_location().clone();
+        let rloc = (*self.state.concrete.registers().return_location()).clone();
         match rloc {
             ReturnLocation::Register(operand) => {
                 f(&mut self.state, Either::Left(operand))
@@ -742,7 +742,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
     }
 
     fn ibranch(&mut self, destination: &Operand) -> Result<Outcome<Self::Outcome>, Self::Error> {
-        if destination == self.state.concrete.registers().program_counter() {
+        if destination == &*self.state.concrete.registers().program_counter() {
             return self.icall(destination);
         }
 
