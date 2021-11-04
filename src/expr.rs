@@ -2,6 +2,8 @@ use std::fmt;
 use std::ops::Deref;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Rem, Shl, Shr, Sub};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::SeqCst;
 
 use hashconsing::{consign, HConsed, HashConsign};
 
@@ -13,6 +15,25 @@ use fugue::ir::il::ecode::{BinOp, BinRel, Cast, UnOp, UnRel, Var};
 
 consign! {
     let EXPR = consign(100 * 1024 /* = capacity */) for Expr;
+}
+
+static IVAR_FACTORY: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IVar(u64, u32);
+
+impl IVar {
+    pub fn new(bits: u32) -> Self {
+        Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits)
+    }
+
+    pub fn bits(&self) -> u32 {
+        self.1
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -45,6 +66,12 @@ impl From<Var> for SymExpr {
     }
 }
 
+impl From<IVar> for SymExpr {
+    fn from(v: IVar) -> Self {
+        SymExpr::ivar(v)
+    }
+}
+
 impl From<Expr> for SymExpr {
     fn from(e: Expr) -> Self {
         Self(EXPR.mk(e))
@@ -73,6 +100,8 @@ pub enum Expr {
     IfElse(SymExpr, SymExpr, SymExpr),
 
     Val(BitVec), // BitVec -> T
+
+    IVar(IVar), // pure symbolic variable
     Var(Var),
 }
 
@@ -270,6 +299,10 @@ impl SymExpr {
 
     pub fn var(var: Var) -> SymExpr {
         EXPR.mk(Expr::Var(var)).into()
+    }
+
+    pub fn ivar(ivar: IVar) -> SymExpr {
+        EXPR.mk(Expr::IVar(ivar)).into()
     }
 
     fn lift_unop(op: UnOp, v: SymExpr) -> SymExpr {
@@ -818,6 +851,7 @@ impl SymExpr {
         match &**self {
             Expr::Val(ref v) => v.bits() as u32,
             Expr::Var(ref v) => v.bits() as u32,
+            Expr::IVar(ref v) => v.bits(),
             Expr::UnOp(_, ref v) | Expr::BinOp(_, ref v, _) => v.bits(),
             Expr::UnRel(_, _) | Expr::BinRel(_, _, _) => 8, // bool
             Expr::Cast(_, Cast::Bool) => 8, // bool
@@ -1113,6 +1147,7 @@ impl Sub for SymExpr {
 pub trait VisitRef<'expr> {
     fn visit_val_ref(&mut self, bv: &'expr BitVec);
     fn visit_var_ref(&mut self, var: &'expr Var);
+    fn visit_ivar_ref(&mut self, ivar: &'expr IVar);
 
     #[allow(unused_variables)]
     fn visit_unop_ref(&mut self, op: UnOp, expr: &'expr SymExpr) {
@@ -1161,6 +1196,7 @@ pub trait VisitRef<'expr> {
         match **expr {
             Expr::Val(ref v) => self.visit_val_ref(v),
             Expr::Var(ref v) => self.visit_var_ref(v),
+            Expr::IVar(ref v) => self.visit_ivar_ref(v),
             Expr::UnOp(op, ref e) => self.visit_unop_ref(op, e),
             Expr::BinOp(op, ref l, ref r) => self.visit_binop_ref(op, l, r),
             Expr::UnRel(op, ref e) => self.visit_unrel_ref(op, e),
@@ -1180,6 +1216,10 @@ pub trait VisitMap<'expr> {
 
     fn visit_var(&mut self, var: &'expr Var) -> SymExpr {
         EXPR.mk(Expr::Var(var.clone())).into()
+    }
+
+    fn visit_ivar(&mut self, ivar: &'expr IVar) -> SymExpr {
+        EXPR.mk(Expr::IVar(ivar.clone())).into()
     }
 
     fn visit_unop(&mut self, op: UnOp, expr: &'expr SymExpr) -> SymExpr {
@@ -1223,6 +1263,7 @@ pub trait VisitMap<'expr> {
         match &**expr {
             Expr::Val(v) => self.visit_val(v),
             Expr::Var(v) => self.visit_var(v),
+            Expr::IVar(v) => self.visit_ivar(v),
             Expr::UnOp(op, e) => self.visit_unop(*op, e),
             Expr::BinOp(op, l, r) => self.visit_binop(*op, l, r),
             Expr::UnRel(op, e) => self.visit_unrel(*op, e),

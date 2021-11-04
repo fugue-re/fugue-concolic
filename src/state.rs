@@ -8,6 +8,7 @@
 /// by returning unconstrained symbolic variables for undefined memory.
 use std::collections::BTreeMap;
 use std::mem::{transmute, MaybeUninit};
+use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
 use either::Either;
@@ -23,9 +24,12 @@ use fuguex::state::{IntoStateValues, State, StateOps};
 
 use itertools::Itertools;
 
+use disjoint_interval_tree::Interval;
+use disjoint_interval_tree::interval_tree::IntervalSet;
+
 use thiserror::Error;
 
-use crate::expr::{Expr, SymExpr};
+use crate::expr::{Expr, IVar, SymExpr};
 use crate::solver::SolverContext;
 use crate::value::Value;
 
@@ -70,6 +74,20 @@ impl Default for Page {
 impl From<Page> for Box<[Option<SymExpr>]> {
     fn from(page: Page) -> Self {
         page.expressions
+    }
+}
+
+impl Index<usize> for Page {
+    type Output = Option<SymExpr>;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.expressions[index]
+    }
+}
+
+impl IndexMut<usize> for Page {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.expressions[index]
     }
 }
 
@@ -195,6 +213,9 @@ pub struct ConcolicState<O: Order> {
     temporaries: BTreeMap<u64, Page>,
     pub(crate) concrete: PCodeState<u8, O>,
     pub(crate) constraints: Vec<SymExpr>,
+    symbolic_registers: bool,
+    symbolic_temporaries: bool,
+    symbolic_memory_regions: IntervalSet<u64>,
 }
 
 impl<O: Order> State for ConcolicState<O> {
@@ -208,6 +229,9 @@ impl<O: Order> State for ConcolicState<O> {
             temporaries: self.temporaries.clone(),
             concrete: self.concrete.fork(),
             constraints: self.constraints.clone(),
+            symbolic_registers: self.symbolic_registers,
+            symbolic_temporaries: self.symbolic_temporaries,
+            symbolic_memory_regions: self.symbolic_memory_regions.clone(),
         }
     }
 
@@ -225,7 +249,24 @@ impl<O: Order> ConcolicState<O> {
             temporaries: BTreeMap::default(),
             concrete,
             constraints: Vec::new(),
+            symbolic_registers: false,
+            symbolic_temporaries: false,
+            symbolic_memory_regions: IntervalSet::new(),
         }
+    }
+
+    pub fn symbolic_registers(&mut self, enabled: bool) {
+        self.symbolic_registers = enabled;
+    }
+
+    pub fn symbolic_temporaries(&mut self, enabled: bool) {
+        self.symbolic_temporaries = enabled;
+    }
+
+    pub fn symbolic_memory_region<I: Into<Interval<Address>>>(&mut self, range: I) {
+        let range = range.into();
+        self.symbolic_memory_regions
+            .insert(u64::from(*range.start())..=u64::from(*range.end()));
     }
 
     fn merge_memory_pages(
@@ -425,14 +466,18 @@ impl<O: Order> ConcolicState<O> {
     }
 
     pub fn is_symbolic_register(&self, register: &Register) -> bool {
-        let start = register.offset();
-        let length = register.size();
-        Self::is_symbolic(&self.registers, start, length)
+        self.symbolic_registers || {
+            let start = register.offset();
+            let length = register.size();
+            Self::is_symbolic(&self.registers, start, length)
+        }
     }
 
     pub fn is_symbolic_memory(&self, start: Address, length: usize) -> bool {
-        let start = u64::from(start);
-        Self::is_symbolic(&self.pages, start, length)
+        self.symbolic_memory_regions.overlaps(u64::from(start)..=u64::from(start)+(length as u64 - 1)) || {
+            let start = u64::from(start);
+            Self::is_symbolic(&self.pages, start, length)
+        }
     }
 
     pub fn size_of_concrete_memory_region(&self, start: Address, length: usize) -> usize {
@@ -441,7 +486,9 @@ impl<O: Order> ConcolicState<O> {
     }
 
     pub fn is_symbolic_temporary(&self, start: u64, length: usize) -> bool {
-        Self::is_symbolic(&self.temporaries, start, length)
+        self.symbolic_temporaries || {
+            Self::is_symbolic(&self.temporaries, start, length)
+        }
     }
 
     pub fn is_symbolic_operand(&self, operand: &Operand) -> bool {
@@ -454,6 +501,22 @@ impl<O: Order> ConcolicState<O> {
             }
             Operand::Variable { offset, size, .. } => {
                 Self::is_symbolic(&self.temporaries, *offset, *size)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_forced_symbolic_operand(&self, operand: &Operand) -> bool {
+        match operand {
+            Operand::Address { value, size } => {
+                self.symbolic_memory_regions
+                    .overlaps(u64::from(value)..=u64::from(value)+(*size as u64 - 1))
+            }
+            Operand::Register { .. } => {
+                self.symbolic_registers
+            }
+            Operand::Variable { .. } => {
+                self.symbolic_temporaries
             }
             _ => false,
         }
@@ -548,7 +611,25 @@ impl<O: Order> ConcolicState<O> {
         Self::concretise(&mut self.temporaries, offset, length)
     }
 
+    pub fn force_concretise_operand(&mut self, operand: &Operand) {
+        match operand {
+            Operand::Address { value, size } => {
+                Self::concretise(&mut self.pages, value.offset(), *size)
+            }
+            Operand::Register { offset, size, .. } => {
+                Self::concretise(&mut self.registers, *offset, *size)
+            }
+            Operand::Variable { offset, size, .. } => {
+                Self::concretise(&mut self.temporaries, *offset, *size)
+            }
+            _ => panic!("cannot concretise Operand::Constant"),
+        }
+    }
+
     pub fn concretise_operand(&mut self, operand: &Operand) {
+        if self.is_forced_symbolic_operand(operand) {
+            return
+        }
         match operand {
             Operand::Address { value, size } => {
                 Self::concretise(&mut self.pages, value.offset(), *size)
@@ -568,20 +649,31 @@ impl<O: Order> ConcolicState<O> {
         operand: &Operand,
         value: T,
     ) -> Result<(), Error> {
-        self.concrete
-            .set_operand(operand, value)
-            .map_err(Error::state)?;
-        match operand {
-            Operand::Address { value, size } => {
-                Self::concretise(&mut self.pages, value.offset(), *size)
+        if self.is_forced_symbolic_operand(operand) {
+            // ensure write-back
+            let mut buf = [0u8; 64]; // for now we hard-code it...
+            let size = operand.size();
+            value.into_values::<O>(&mut buf[..size]);
+
+            self.write_operand_bytes(
+                operand, buf[..size].iter().map(|v| SymExpr::val(*v)));
+        } else {
+            self.concrete
+                .set_operand(operand, value)
+                .map_err(Error::state)?;
+
+            match operand {
+                Operand::Address { value, size } => {
+                    Self::concretise(&mut self.pages, value.offset(), *size)
+                }
+                Operand::Register { offset, size, .. } => {
+                    Self::concretise(&mut self.registers, *offset, *size)
+                }
+                Operand::Variable { offset, size, .. } => {
+                    Self::concretise(&mut self.temporaries, *offset, *size)
+                }
+                _ => panic!("cannot concretise Operand::Constant"),
             }
-            Operand::Register { offset, size, .. } => {
-                Self::concretise(&mut self.registers, *offset, *size)
-            }
-            Operand::Variable { offset, size, .. } => {
-                Self::concretise(&mut self.temporaries, *offset, *size)
-            }
-            _ => panic!("cannot concretise Operand::Constant"),
         }
         Ok(())
     }
@@ -758,6 +850,93 @@ impl<O: Order> ConcolicState<O> {
             }
             Operand::Variable { offset, size, .. } => self.read_temporary_bytes(*offset, *size),
         }
+    }
+
+    pub fn read_symbolic_operand_bytes(&mut self, operand: &Operand) -> Vec<SymExpr> {
+        match operand {
+            Operand::Address { value, size } => {
+                Self::read_symbolic_bytes(&mut self.pages, value.offset(), *size)
+            },
+            Operand::Constant { size, value, .. } => {
+                let value = *value;
+                let mut buf = [0u8; 8];
+
+                value.into_bytes::<O>(&mut buf);
+
+                let bufr = if O::ENDIAN.is_big() {
+                    &buf[8 - size..]
+                } else {
+                    &buf[..*size]
+                };
+
+                bufr
+                    .iter()
+                    .map(|b| BitVec::from(*b).into())
+                    .collect::<Vec<_>>()
+            },
+            Operand::Register { offset, size, .. } => {
+                Self::read_symbolic_bytes(&mut self.registers, *offset, *size)
+            },
+            Operand::Variable { offset, size, .. } => {
+                Self::read_symbolic_bytes(&mut self.temporaries, *offset, *size)
+            },
+        }
+    }
+
+    fn read_symbolic_bytes(
+        pages: &mut BTreeMap<u64, Page>,
+        start: u64,
+        length: usize,
+    ) -> Vec<SymExpr> {
+        let page_size = PAGE_SIZE as u64;
+
+        let aligned_start = start / page_size;
+        let aligned_end = (start + length as u64) / page_size;
+
+        let offset_start = start % page_size;
+        let offset_end = (start + length as u64) % page_size;
+
+        let range = (aligned_start..=aligned_end).step_by(PAGE_SIZE);
+        let spos = 0;
+        let epos = (aligned_end - aligned_start) as usize / PAGE_SIZE;
+
+        let mut exprs = Vec::new();
+
+        for (idx, page) in range.enumerate() {
+            let offset = if idx == spos {
+                offset_start as usize
+            } else {
+                0
+            };
+            let length = if idx == epos {
+                offset_end as usize - offset
+            } else {
+                PAGE_SIZE
+            };
+
+            if let Some(p) = pages.get_mut(&page) {
+                exprs.extend(p.view_mut(offset, length).iter_mut().map(|e| match e {
+                    None => {
+                        let v = SymExpr::from(IVar::new(8));
+                        *e = Some(v.clone());
+                        v
+                    },
+                    Some(e) => e.clone(),
+                }));
+            } else {
+                let mut p = Page::new();
+
+                exprs.extend(p.view_mut(offset, length).iter_mut().map(|pv| {
+                    let v = SymExpr::from(IVar::new(8));
+                    *pv = Some(v.clone());
+                    v
+                }));
+
+                pages.insert(page, p);
+            }
+        }
+
+        exprs
     }
 
     // Treat each byte in the range as a separate entity
@@ -1286,35 +1465,67 @@ impl<O: Order> ConcolicState<O> {
         value: Either<BitVec, SymExpr>,
     ) -> Result<(), Error> {
         match value {
-            Either::Left(bv) => self.concretise_operand_with(operand, bv),
+            Either::Left(bv) => if !self.is_forced_symbolic_operand(operand) {
+                self.concretise_operand_with(operand, bv)?;
+            } else {
+                self.write_operand_expr(operand, bv.into())
+            },
             Either::Right(expr) => {
                 let val = expr.simplify();
-                if let Expr::Val(bv) = &*val {
-                    self.concretise_operand_with(operand, bv)?;
+                if !self.is_forced_symbolic_operand(operand) {
+                    if let Expr::Val(bv) = &*val {
+                        self.concretise_operand_with(operand, bv)?;
+                    } else {
+                        self.write_operand_expr(operand, val);
+                    }
                 } else {
-                    self.write_operand_expr(operand, val);
+                    self.write_operand_expr(operand, val)
                 }
-                Ok(())
             }
         }
+        Ok(())
     }
 
     pub fn read_operand_value(&mut self, operand: &Operand) -> Result<Either<BitVec, SymExpr>, Error> {
-        if self.is_symbolic_operand(operand) {
-            let expr = self.read_operand_expr(operand)?.simplify();
+        if self.is_forced_symbolic_operand(operand) {
+            let expr = self.read_symbolic_operand_expr(operand)?.simplify();
             if let Expr::Val(bv) = &*expr {
-                self.concretise_operand_with(operand, bv)?;
                 Ok(Either::Left(bv.clone()))
             } else {
                 Ok(Either::Right(expr))
             }
         } else {
-            let bv = self
-                .concrete
-                .get_operand::<BitVec>(operand)
-                .map_err(Error::state)?;
-            Ok(Either::Left(bv))
+            if self.is_symbolic_operand(operand) {
+                let expr = self.read_operand_expr(operand)?.simplify();
+                if let Expr::Val(bv) = &*expr {
+                    self.concretise_operand_with(operand, bv)?;
+                    Ok(Either::Left(bv.clone()))
+                } else {
+                    Ok(Either::Right(expr))
+                }
+            } else {
+                let bv = self
+                    .concrete
+                    .get_operand::<BitVec>(operand)
+                    .map_err(Error::state)?;
+                Ok(Either::Left(bv))
+            }
         }
+    }
+
+    pub fn read_symbolic_operand_expr(&mut self, operand: &Operand) -> Result<SymExpr, Error> {
+        let vals = self.read_symbolic_operand_bytes(operand);
+        let expr = if O::ENDIAN.is_big() {
+            vals.into_iter()
+                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .unwrap()
+        } else {
+            vals.into_iter()
+                .rev()
+                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .unwrap()
+        };
+        Ok(expr)
     }
 
     pub fn read_operand_expr(&self, operand: &Operand) -> Result<SymExpr, Error> {

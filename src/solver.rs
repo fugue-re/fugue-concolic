@@ -7,7 +7,7 @@ use fugue::ir::il::ecode::Var;
 use fxhash::FxHashMap as HashMap;
 use std::sync::Arc;
 
-use crate::expr::SymExpr;
+use crate::expr::{IVar, SymExpr};
 use crate::value::Value;
 
 const SOLVER_LIMIT: usize = 100;
@@ -16,6 +16,7 @@ const SOLVER_LIMIT: usize = 100;
 pub struct SolverContext {
     pub(crate) solver: Arc<Btor>,
     pub(crate) vars: HashMap<Var, BV<Arc<Btor>>>,
+    pub(crate) ivars: HashMap<IVar, BV<Arc<Btor>>>,
     pub(crate) translator: Arc<Translator>,
     pub(crate) limit: usize,
 }
@@ -32,6 +33,7 @@ impl SolverContext {
         Self {
             solver: Arc::new(solver),
             vars: HashMap::default(),
+            ivars: HashMap::default(),
             translator,
             limit,
         }
@@ -43,6 +45,16 @@ impl SolverContext {
         } else {
             let bv = BV::new(self.solver(), var.bits() as u32, None);
             self.vars.insert(var.to_owned(), bv.clone());
+            bv
+        }
+    }
+
+    pub fn ivar(&mut self, ivar: &IVar) -> BV<Arc<Btor>> {
+        if let Some(bv) = self.ivars.get(ivar).cloned() {
+            bv
+        } else {
+            let bv = BV::new(self.solver(), ivar.bits() as u32, None);
+            self.ivars.insert(ivar.to_owned(), bv.clone());
             bv
         }
     }

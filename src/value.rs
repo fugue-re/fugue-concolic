@@ -5,7 +5,7 @@ use fugue::ir::il::ecode::{BinOp, BinRel, Cast, UnOp, UnRel, Var};
 
 use std::sync::Arc;
 
-use crate::expr::{Expr, SymExpr, VisitRef};
+use crate::expr::{Expr, SymExpr, IVar, VisitRef};
 use crate::solver::SolverContext;
 
 struct ToAst<'c> {
@@ -23,6 +23,10 @@ impl<'c> ToAst<'c> {
 
     fn var(&mut self, var: &Var) -> BV<Arc<Btor>> {
         self.ctxt.var(var)
+    }
+
+    fn ivar(&mut self, ivar: &IVar) -> BV<Arc<Btor>> {
+        self.ctxt.ivar(ivar)
     }
 
     fn solver(&self) -> Arc<Btor> {
@@ -52,6 +56,10 @@ impl<'c, 'ecode> VisitRef<'ecode> for ToAst<'c> {
 
     fn visit_var_ref(&mut self, var: &'ecode Var) {
         self.value = Some(self.var(var));
+    }
+
+    fn visit_ivar_ref(&mut self, ivar: &'ecode IVar) {
+        self.value = Some(self.ivar(ivar));
     }
 
     fn visit_unrel_ref(&mut self, op: UnRel, _expr: &'ecode SymExpr) {

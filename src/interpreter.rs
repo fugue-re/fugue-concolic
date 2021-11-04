@@ -1914,7 +1914,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             .set_address(&self.program_counter, address)
             .map_err(StateError::State)?;
 
-        self.state.concretise_operand(&self.program_counter);
+        self.state.force_concretise_operand(&self.program_counter);
 
         Ok(step_state)
     }
