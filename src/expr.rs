@@ -22,6 +22,12 @@ static IVAR_FACTORY: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IVar(u64, u32);
 
+impl fmt::Display for IVar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ivar{:x}:{}", self.id(), self.bits())
+    }
+}
+
 impl IVar {
     pub fn new(bits: u32) -> Self {
         Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits)
@@ -110,6 +116,7 @@ impl Expr {
         match self {
             Expr::Val(v) => write!(f, "{:#x}", v),
             Expr::Var(v) => write!(f, "{}", v),
+            Expr::IVar(v) => write!(f, "{}", v),
 
             Expr::Cast(expr, Cast::High(bits)) => write!(f, "extract-msb({}, bits={})", expr, bits),
             Expr::Cast(expr, Cast::Low(bits)) => write!(f, "extract-lsb({}, bits={})", expr, bits),
@@ -530,7 +537,15 @@ impl SymExpr {
     }
 
     pub fn concat(self, r: SymExpr) -> SymExpr {
-        EXPR.mk(Expr::Concat(self, r)).into()
+        let l = self;
+        if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
+            let sz = lv.bits() + rv.bits();
+            let h = lv.unsigned_cast(sz) << (rv.bits() as u32);
+            let l = rv.unsigned_cast(sz);
+            Self::val(h | l)
+        } else {
+            EXPR.mk(Expr::Concat(l, r)).into()
+        }
     }
 
     pub fn extract_high(self, bits: u32) -> SymExpr {
@@ -564,7 +579,7 @@ impl SymExpr {
             self
         } else if let Expr::Val(ref bv) = &*self {
             Self::val(if lsb > 0 {
-                (bv << lsb).unsigned_cast((msb - lsb) as usize)
+                (bv >> lsb).unsigned_cast((msb - lsb) as usize)
             } else {
                 bv.unsigned_cast((msb - lsb) as usize)
             })

@@ -1909,12 +1909,21 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             step_state
         };
 
+        /*
         self.state
             .concrete
             .set_address(&self.program_counter, address)
             .map_err(StateError::State)?;
 
-        self.state.force_concretise_operand(&self.program_counter);
+        self.state.concretise_operand(&self.program_counter);
+        */
+
+        let address = BitVec::from_u64(
+            u64::from(address),
+            self.program_counter.size() * 8,
+        );
+
+        self.state.concretise_operand_with(&self.program_counter, address)?;
 
         Ok(step_state)
     }

@@ -651,6 +651,7 @@ impl<O: Order> ConcolicState<O> {
     ) -> Result<(), Error> {
         if self.is_forced_symbolic_operand(operand) {
             // ensure write-back
+
             let mut buf = [0u8; 64]; // for now we hard-code it...
             let size = operand.size();
             value.into_values::<O>(&mut buf[..size]);
