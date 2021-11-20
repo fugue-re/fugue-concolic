@@ -22,6 +22,16 @@ pub trait HookConcolic {
         &mut self,
         state: &mut Self::State,
         address: &Address,
+        bytes: usize,
+    ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
+        Ok(HookAction::Pass.into())
+    }
+
+    fn hook_symbolic_memory_read(
+        &mut self,
+        state: &mut Self::State,
+        address: &SymExpr,
+        bytes: usize,
     ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
         Ok(HookAction::Pass.into())
     }
@@ -30,6 +40,15 @@ pub trait HookConcolic {
         &mut self,
         state: &mut Self::State,
         address: &Address,
+        value: &Either<BitVec, SymExpr>,
+    ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
+        Ok(HookAction::Pass.into())
+    }
+
+    fn hook_symbolic_memory_write(
+        &mut self,
+        state: &mut Self::State,
+        address: &SymExpr,
         value: &Either<BitVec, SymExpr>,
     ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
         Ok(HookAction::Pass.into())
@@ -58,8 +77,8 @@ pub trait HookConcolic {
         operand: &Operand,
     ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
         match operand {
-            Operand::Address { value: address, .. } => {
-                self.hook_memory_read(state, &address.into())
+            Operand::Address { value: address, size } => {
+                self.hook_memory_read(state, address, *size)
             },
             Operand::Register { .. } => {
                 self.hook_register_read(state, &operand.register().unwrap())
@@ -76,7 +95,7 @@ pub trait HookConcolic {
     ) -> Result<HookOutcome<HookAction<Self::Outcome>>, Error<Self::Error>> {
         match operand {
             Operand::Address { value: address, .. } => {
-                self.hook_memory_write(state, &address.into(), value)
+                self.hook_memory_write(state, address, value)
             },
             Operand::Register { .. } => {
                 self.hook_register_write(state, &operand.register().unwrap(), value)

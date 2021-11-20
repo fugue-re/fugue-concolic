@@ -827,7 +827,7 @@ impl<O: Order> ConcolicState<O> {
 
     pub fn read_operand_bytes(&self, operand: &Operand) -> Result<Vec<SymExpr>, Error> {
         match operand {
-            Operand::Address { value, size } => self.read_memory_bytes(value.into(), *size),
+            Operand::Address { value, size } => self.read_memory_bytes(*value, *size),
             Operand::Constant { size, value, .. } => {
                 let value = *value;
                 let mut buf = [0u8; 8];
@@ -1275,7 +1275,7 @@ impl<O: Order> ConcolicState<O> {
 
     pub fn write_operand_bytes<I: IntoIterator<Item = SymExpr>>(&mut self, operand: &Operand, it: I) {
         match operand {
-            Operand::Address { value, .. } => self.write_memory_bytes(value.into(), it),
+            Operand::Address { value, .. } => self.write_memory_bytes(*value, it),
             Operand::Register { .. } => {
                 let register = operand.register().unwrap();
                 self.write_register_bytes(&register, it)

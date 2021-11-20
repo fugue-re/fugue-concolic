@@ -13,6 +13,7 @@ use fuguex::state::pcode::PCodeState;
 use parking_lot::Mutex;
 
 use crate::interpreter::{ConcolicContext, Error as ConcolicError};
+use crate::pointer::{DefaultPointerStrategy, SymbolicPointerStrategy};
 use crate::state::ConcolicState;
 
 use thiserror::Error;
@@ -55,19 +56,19 @@ impl<P: Ord, O: Order> Ord for StatePriority<P, O> {
 }
 
 #[derive(Clone)]
-pub struct ConcolicMachine<O: Order, const OPERAND_SIZE: usize> {
-    machine: Machine<ConcolicContext<O, OPERAND_SIZE>>,
+pub struct ConcolicMachine<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> {
+    machine: Machine<ConcolicContext<O, P, OPERAND_SIZE>>,
     states: BinaryHeap<StatePriority<usize, O>>,
     state_filters: Arc<Mutex<Vec<Box<dyn FnMut(&Location, &ConcolicState<O>) -> bool>>>>,
     state_rankers: Arc<Mutex<Vec<Box<dyn FnMut(&Location, &ConcolicState<O>) -> StateRank>>>>,
     translator: Arc<Translator>
 }
 
-impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
+impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, DefaultPointerStrategy<O>, OPERAND_SIZE> {
     pub fn new(translator: Arc<Translator>, state: PCodeState<u8, O>) -> Self {
         Self {
             translator: translator.clone(),
-            machine: Machine::new(ConcolicContext::new(translator, state)),
+            machine: Machine::new(ConcolicContext::new(translator, state, DefaultPointerStrategy::default())),
             states: BinaryHeap::new(),
             state_filters: Arc::new(Mutex::new(Vec::new())),
             state_rankers: Arc::new(Mutex::new(Vec::new())),
@@ -76,7 +77,24 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
 
     pub fn new_from(loader: MappedDatabase<PCodeState<u8, O>>) -> Self {
         let translator = loader.translator();
-        Self::new(translator, loader.into_state())
+        Self::new_with(translator, loader.into_state(), DefaultPointerStrategy::default())
+    }
+}
+
+impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> ConcolicMachine<O, P, OPERAND_SIZE> {
+    pub fn new_with(translator: Arc<Translator>, state: PCodeState<u8, O>, pointer_strategy: P) -> Self {
+        Self {
+            translator: translator.clone(),
+            machine: Machine::new(ConcolicContext::new(translator, state, pointer_strategy)),
+            states: BinaryHeap::new(),
+            state_filters: Arc::new(Mutex::new(Vec::new())),
+            state_rankers: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn new_from_with(loader: MappedDatabase<PCodeState<u8, O>>, pointer_strategy: P) -> Self {
+        let translator = loader.translator();
+        Self::new_with(translator, loader.into_state(), pointer_strategy)
     }
 
     pub fn add_filter<F>(&mut self, f: F)
@@ -89,11 +107,11 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, OPERAND_SIZE> {
         self.state_rankers.lock().push(Box::new(f));
     }
 
-    pub fn interpreter(&self) -> &ConcolicContext<O, OPERAND_SIZE> {
+    pub fn interpreter(&self) -> &ConcolicContext<O, P, OPERAND_SIZE> {
         self.machine.interpreter()
     }
 
-    pub fn interpreter_mut(&mut self) -> &mut ConcolicContext<O, OPERAND_SIZE> {
+    pub fn interpreter_mut(&mut self) -> &mut ConcolicContext<O, P, OPERAND_SIZE> {
         self.machine.interpreter_mut()
     }
 

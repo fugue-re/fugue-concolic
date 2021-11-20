@@ -12,6 +12,9 @@ use fnv::FnvHashMap as HashMap;
 use fugue::bv::BitVec;
 use fugue::fp::FloatFormat;
 use fugue::ir::il::ecode::{BinOp, BinRel, Cast, UnOp, UnRel, Var};
+use fugue::ir::space::AddressSpaceId;
+
+use smallvec::SmallVec;
 
 consign! {
     let EXPR = consign(100 * 1024 /* = capacity */) for Expr;
@@ -99,11 +102,14 @@ pub enum Expr {
     BinOp(BinOp, SymExpr, SymExpr), // T * T -> T
 
     Cast(SymExpr, Cast), // T -> Cast::T
+    Load(SymExpr, usize, AddressSpaceId), // SPACE[T]:SIZE -> T
 
     Extract(SymExpr, u32, u32), // T T[LSB..MSB) -> T
     Concat(SymExpr, SymExpr),   // T * T -> T
 
     IfElse(SymExpr, SymExpr, SymExpr),
+
+    Intrinsic(Arc<str>, SmallVec<[SymExpr; 4]>, usize),
 
     Val(BitVec), // BitVec -> T
 
@@ -360,7 +366,7 @@ impl SymExpr {
         Self::lift_unop(UnOp::FLOOR, self)
     }
 
-    #[deprecated(since = "0.0", note="use `Expr::count_ones`")]
+    #[deprecated(since = "0.0", note="use `SymExpr::count_ones`")]
     pub fn popcount(self) -> SymExpr {
         Self::lift_unop(UnOp::POPCOUNT, self)
     }
@@ -568,7 +574,7 @@ impl SymExpr {
         } else if let Expr::Val(ref bv) = &*self {
             Self::val(bv.unsigned_cast(bits as usize))
         } else {
-            EXPR.mk(Expr::Cast(self, Cast::High(bits as usize))).into()
+            EXPR.mk(Expr::Cast(self, Cast::Low(bits as usize))).into()
         }
     }
 
@@ -862,6 +868,14 @@ impl SymExpr {
         }
     }
 
+    pub fn load(expr: SymExpr, bits: usize, space: AddressSpaceId) -> SymExpr {
+        Self(EXPR.mk(Expr::Load(expr, bits, space)))
+    }
+
+    pub fn intrinsic<S: AsRef<str>, I: IntoIterator<Item=SymExpr>>(name: S, args: I, bits: usize) -> SymExpr {
+        Self(EXPR.mk(Expr::Intrinsic(Arc::from(name.as_ref()), args.into_iter().collect(), bits)))
+    }
+
     pub fn bits(&self) -> u32 {
         match &**self {
             Expr::Val(ref v) => v.bits() as u32,
@@ -872,8 +886,10 @@ impl SymExpr {
             Expr::Cast(_, Cast::Bool) => 8, // bool
             Expr::Cast(_, c) => c.bits() as u32,
             Expr::IfElse(_, ref l, _) => l.bits(),
+            Expr::Intrinsic(_, _, bits) => *bits as u32,
             Expr::Concat(ref l, ref r) => l.bits() + r.bits(),
             Expr::Extract(_, lsb, msb) => msb - lsb,
+            Expr::Load(_, bits, _) => *bits as u32,
         }
     }
 
@@ -1207,6 +1223,18 @@ pub trait VisitRef<'expr> {
         self.visit_expr_ref(rexpr);
     }
 
+    #[allow(unused_variables)]
+    fn visit_load_ref(&mut self, expr: &'expr SymExpr, bits: usize, space: AddressSpaceId) {
+        self.visit_expr_ref(expr);
+    }
+
+    #[allow(unused_variables)]
+    fn visit_intrinsic_ref(&mut self, name: &str, args: &'expr [SymExpr], bits: usize) {
+        for arg in args {
+            self.visit_expr_ref(arg);
+        }
+    }
+
     fn visit_expr_ref(&mut self, expr: &'expr SymExpr) {
         match **expr {
             Expr::Val(ref v) => self.visit_val_ref(v),
@@ -1220,6 +1248,8 @@ pub trait VisitRef<'expr> {
             Expr::Concat(ref l, ref r) => self.visit_concat_ref(l, r),
             Expr::IfElse(ref c, ref l, ref r) => self.visit_ite_ref(c, l, r),
             Expr::Cast(ref e, ref c) => self.visit_cast_ref(e, c),
+            Expr::Load(ref e, sz, spc) => self.visit_load_ref(e, sz, spc),
+            Expr::Intrinsic(ref name, ref args, sz) => self.visit_intrinsic_ref(name, args, sz),
         }
     }
 }
@@ -1274,6 +1304,14 @@ pub trait VisitMap<'expr> {
         self.visit_expr(cond).ite(self.visit_expr(lexpr), self.visit_expr(rexpr))
     }
 
+    fn visit_load(&mut self, expr: &'expr SymExpr, bits: usize, space: AddressSpaceId) -> SymExpr {
+        SymExpr::load(self.visit_expr(expr), bits, space)
+    }
+
+    fn visit_intrinsic(&mut self, name: Arc<str>, args: &'expr [SymExpr], bits: usize) -> SymExpr {
+        SymExpr::intrinsic(name, args.iter().map(|arg| self.visit_expr(arg)), bits)
+    }
+
     fn visit_expr(&mut self, expr: &'expr SymExpr) -> SymExpr {
         match &**expr {
             Expr::Val(v) => self.visit_val(v),
@@ -1287,6 +1325,8 @@ pub trait VisitMap<'expr> {
             Expr::Extract(e, lsb, msb) => self.visit_extract(e, *lsb, *msb),
             Expr::Concat(l, r) => self.visit_concat(l, r),
             Expr::Cast(e, c) => self.visit_cast(e, c),
+            Expr::Load(e, sz, spc) => self.visit_load(e, *sz, *spc),
+            Expr::Intrinsic(name, args, sz) => self.visit_intrinsic(name.clone(), args, *sz),
         }
     }
 }

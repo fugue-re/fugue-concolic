@@ -5,7 +5,7 @@ use either::Either;
 use fugue::bv::BitVec;
 use fugue::bytes::Order;
 use fugue::fp::{self, float_format_from_size, Float, FloatFormat, FloatFormatOps};
-use fugue::ir::{Address, AddressSpace, AddressValue, IntoAddress, Translator};
+use fugue::ir::{Address, AddressSpace, AddressSpaceId, AddressValue, IntoAddress, Translator};
 use fugue::ir::disassembly::ContextDatabase;
 use fugue::ir::il::pcode::Operand;
 
@@ -24,6 +24,7 @@ use thiserror::Error;
 
 use crate::expr::SymExpr;
 use crate::hooks::ClonableHookConcolic;
+use crate::pointer::SymbolicPointerStrategy;
 use crate::state::{ConcolicState, Error as StateError};
 use crate::value::Value;
 
@@ -45,8 +46,8 @@ pub enum Error {
     UnsatisfiablePC,
     #[error("unsupported address size of {} bits", .0 * 8)]
     UnsupportedAddressSize(usize),
-    #[error("unsupported branch destination in `{}` space", .0.name())]
-    UnsupportedBranchDestination(Arc<AddressSpace>),
+    #[error("unsupported branch destination")]
+    UnsupportedBranchDestination,
     #[error(transparent)]
     UnsupportedFloatFormat(#[from] fp::Error),
     #[error("unsupported operand size of {0} bytes; maximum supported is {1} bytes")]
@@ -91,12 +92,13 @@ impl<O: Order> NextLocation<O> {
 pub type Outcomes<O> = Vec<(Branch, ConcolicState<O>)>;
 
 #[derive(Clone)]
-pub struct ConcolicContext<O: Order, const OPERAND_SIZE: usize> {
+pub struct ConcolicContext<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> {
     hooks: Vec<
         Box<dyn ClonableHookConcolic<State = ConcolicState<O>, Error = StateError, Outcome = Outcomes<O>>>,
     >,
     program_counter: Arc<Operand>,
     state: ConcolicState<O>,
+    pointer_strategy: P,
     translator: Arc<Translator>,
     translator_context: ContextDatabase,
     translator_cache: Arc<RwLock<HashMap<Address, StepState>>>,
@@ -104,18 +106,18 @@ pub struct ConcolicContext<O: Order, const OPERAND_SIZE: usize> {
 }
 
 trait ToSignedBytes {
-    fn expand_as<O: Order, const OPERAND_SIZE: usize>(
+    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error>;
 }
 
 impl ToSignedBytes for bool {
-    fn expand_as<O: Order, const OPERAND_SIZE: usize>(
+    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
         dest: &Operand,
         _signed: bool,
     ) -> Result<(), Error> {
@@ -136,9 +138,9 @@ impl ToSignedBytes for bool {
 }
 
 impl ToSignedBytes for BitVec {
-    fn expand_as<O: Order, const OPERAND_SIZE: usize>(
+    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error> {
@@ -172,9 +174,9 @@ impl ToSignedBytes for BitVec {
 }
 
 impl ToSignedBytes for SymExpr {
-    fn expand_as<O: Order, const OPERAND_SIZE: usize>(
+    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error> {
@@ -211,9 +213,9 @@ where
     L: ToSignedBytes,
     R: ToSignedBytes,
 {
-    fn expand_as<O: Order, const OPERAND_SIZE: usize>(
+    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error> {
@@ -224,13 +226,14 @@ where
     }
 }
 
-impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
-    pub fn new(translator: Arc<Translator>, state: PCodeState<u8, O>) -> Self {
+impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> ConcolicContext<O, P, { OPERAND_SIZE }> {
+    pub fn new(translator: Arc<Translator>, state: PCodeState<u8, O>, pointer_strategy: P) -> Self {
         Self {
             hooks: Vec::new(),
             intrinsics: IntrinsicHandler::new(),
             program_counter: state.registers().program_counter(),
             state: ConcolicState::new(translator.clone(), state),
+            pointer_strategy,
             translator_cache: Arc::new(RwLock::new(HashMap::default())),
             translator_context: translator.context_database(),
             translator,
@@ -264,7 +267,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
         let solns = value.solve_many(&mut state.solver, &state.constraints);
 
         for val in solns {
-            let address = (&val).into_address_value(state.concrete.memory_space());
+            let address = (&val).into_address_value(state.concrete.memory_space_ref());
             let location = Branch::Global(address);
 
             let mut fork = state.fork();
@@ -285,7 +288,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     pub fn ibranch_on(state: &mut ConcolicState<O>, pc: &Operand) -> Result<NextLocation<O>, Error> {
         match state.read_operand_value(pc)? {
             Either::Left(bv) => {
-                let memory_space = state.concrete.memory_space();
+                let memory_space = state.concrete.memory_space_ref();
                 let location = Branch::Global(bv.into_address_value(memory_space));
                 Ok(NextLocation::Concrete(location))
             }
@@ -295,11 +298,13 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
 
     pub fn branch_on(state: &mut ConcolicState<O>, pc: &Operand) -> Result<NextLocation<O>, Error> {
         if let Operand::Address { value, .. } = pc {
-            Ok(NextLocation::Concrete(Branch::Global(value.clone())))
+            let memory_space = state.concrete.memory_space_ref();
+            let address = value.into_address_value(memory_space);
+            Ok(NextLocation::Concrete(Branch::Global(address)))
         } else {
             match state.read_operand_value(pc)? {
                 Either::Left(bv) => {
-                    let memory_space = state.concrete.memory_space();
+                    let memory_space = state.concrete.memory_space_ref();
                     let location = Branch::Global(bv.into_address_value(memory_space));
                     Ok(NextLocation::Concrete(location))
                 }
@@ -335,7 +340,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
                 match self.get_address(&operand)? {
                     Either::Left(address) => {
                         let operand = Operand::Address {
-                            value: address,
+                            value: address.into(),
                             size: self.interpreter_space().address_size(),
                         };
                         f(&mut self.state, Either::Left(operand))
@@ -704,7 +709,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicContext<O, { OPERAND_SIZE }> {
     }
 }
 
-impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { OPERAND_SIZE }> {
+impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, P, { OPERAND_SIZE }> {
     type State = ConcolicState<O>;
     type Error = Error;
     type Outcome = Vec<(Branch, Self::State)>;
@@ -714,6 +719,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
             hooks: self.hooks.clone(),
             program_counter: self.program_counter.clone(),
             state: self.state.fork(),
+            pointer_strategy: self.pointer_strategy.clone(),
             translator: self.translator.clone(),
             translator_context: self.translator_context.clone(),
             translator_cache: self.translator_cache.clone(),
@@ -732,11 +738,13 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                 Ok(Outcome::Branch(action))
             }
             Operand::Address { value, .. } => {
-                let action = Branch::Global(value.clone());
+                let memory_space = self.state.concrete.memory_space_ref();
+                let address = value.into_address_value(memory_space);
+                let action = Branch::Global(address);
                 Ok(Outcome::Branch(action))
             }
-            Operand::Register { space, .. } | Operand::Variable { space, .. } => {
-                return Err(Error::UnsupportedBranchDestination(space.clone()))
+            Operand::Register { .. } | Operand::Variable { .. } => {
+                return Err(Error::UnsupportedBranchDestination)
             }
         }
     }
@@ -802,13 +810,12 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
 
     fn call(&mut self, destination: &Operand) -> Result<Outcome<Self::Outcome>, Self::Error> {
         match destination {
-            Operand::Address { value, .. } => {
+            Operand::Address { value: address, .. } => {
                 let mut skip = false;
-                let address = value.into();
 
                 for hook in self.hooks.iter_mut() {
                     match hook
-                        .hook_call(&mut self.state, &address)
+                        .hook_call(&mut self.state, address)
                         .map_err(Error::Hook)?
                         .action
                     {
@@ -826,13 +833,15 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                         NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
                     }
                 } else {
-                    Ok(Outcome::Branch(Branch::Global(value.clone())))
+                    let memory_space = self.state.concrete.memory_space_ref();
+                    let address = address.into_address_value(memory_space);
+                    Ok(Outcome::Branch(Branch::Global(address)))
                 }
             },
-            Operand::Constant { space, .. }
-            | Operand::Register { space, .. }
-            | Operand::Variable { space, .. } => {
-                Err(Error::UnsupportedBranchDestination(space.clone()))
+            Operand::Constant { .. }
+            | Operand::Register { .. }
+            | Operand::Variable { .. } => {
+                Err(Error::UnsupportedBranchDestination)
             }
         }
     }
@@ -909,8 +918,9 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
         &mut self,
         source: &Operand,
         destination: &Operand,
-        space: Arc<AddressSpace>,
+        space: AddressSpaceId,
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
+        let space = self.translator.manager().space_by_id(space);
         let space_size = space.address_size();
         let space_word_size = space.word_size() as u64;
 
@@ -933,7 +943,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                         .wrapping_sub(1);
 
                 let address = Operand::Address {
-                    value: AddressValue::new(space, addr_val),
+                    value: Address::new(space, addr_val),
                     size: destination.size(),
                 };
 
@@ -952,9 +962,18 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                     SymExpr::and(off, msk.into())
                 };
 
+                let size = destination.size();
+
+                for hook in self.hooks.iter_mut() {
+                    hook.hook_symbolic_memory_read(&mut self.state, &addr, size)
+                        .map_err(Error::Hook)?;
+                }
+
                 let value = self
-                    .state
-                    .read_memory_symbolic(&addr, destination.size() * 8)?;
+                    .pointer_strategy
+                    .read_symbolic_memory(&mut self.state, &addr, size * 8)
+                    .map_err(|e| e.into())?;
+
                 self.state.write_operand_expr(destination, value.clone());
 
                 let bv = Either::Right(value);
@@ -973,8 +992,9 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
         &mut self,
         source: &Operand,
         destination: &Operand,
-        space: Arc<AddressSpace>,
+        space: AddressSpaceId,
     ) -> Result<Outcome<Self::Outcome>, Self::Error> {
+        let space = self.translator.manager().space_by_id(space);
         let space_size = space.address_size();
         let space_word_size = space.word_size() as u64;
 
@@ -997,7 +1017,7 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
                         .wrapping_sub(1);
 
                 let address = Operand::Address {
-                    value: AddressValue::new(space, addr_val),
+                    value: Address::new(space, addr_val),
                     size: source.size(),
                 };
 
@@ -1018,10 +1038,16 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
 
                 let value = self
                     .state
-                    .read_operand_value(source)?
-                    .either(|bv| SymExpr::from(bv), |expr| expr);
+                    .read_operand_value(source)?;
 
-                self.state.write_memory_symbolic(&addr, value)?;
+                self.pointer_strategy
+                    .write_symbolic_memory(&mut self.state, &addr, value.clone())
+                    .map_err(|e| e.into())?;
+
+                for hook in self.hooks.iter_mut() {
+                    hook.hook_symbolic_memory_write(&mut self.state, &addr, &value)
+                        .map_err(Error::Hook)?;
+                }
 
                 Ok(Outcome::Branch(Branch::Next))
             }
@@ -1862,7 +1888,8 @@ impl<O: Order, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, { O
 
     fn lift<A>(&mut self, address: A) -> Result<StepState, Self::Error>
     where A: IntoAddress {
-        let address_value = address.into_address_value(self.interpreter_space());
+        let memory_space = self.state.concrete.memory_space_ref();
+        let address_value = address.into_address_value(memory_space);
         let address = Address::from(&address_value);
 
         // begin read lock region

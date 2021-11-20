@@ -1,6 +1,6 @@
 [package]
 name = "fugue-concolic"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2018"
 
 [features]
@@ -24,4 +24,5 @@ hashconsing = "1"
 itertools = "0.10"
 log = "0.4"
 parking_lot = "0.11"
+smallvec = "1"
 thiserror = "1"
