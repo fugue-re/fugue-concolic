@@ -39,6 +39,8 @@ pub enum Error {
     State(#[from] PCodeError),
     #[error("unsatisfiable symbolic address: {0}")]
     UnsatAddress(SymExpr),
+    #[error("unsatisfiable symbolic variable: {0}")]
+    UnsatVariable(SymExpr),
 }
 
 impl Error {
@@ -1584,6 +1586,39 @@ impl<O: Order> ConcolicState<O> {
         }
     }
 
+    pub fn read_memory_symbolic_bytes(&mut self, addr: &SymExpr, count: usize) -> Result<Vec<SymExpr>, Error> {
+        let addr = addr.simplify();
+
+        if let Expr::Val(bv) = &*addr {
+            let naddr = bv.to_u64().expect("64-bit address limit");
+            self.read_memory_bytes(self.solver.translator().address(naddr).into(), count)
+        } else {
+            let addrs = addr.solve_many(&mut self.solver, &self.constraints);
+            if addrs.is_empty() {
+                return Err(Error::UnsatAddress(addr));
+            }
+
+            let mut bytes = Vec::new();
+
+            for i in 0..count {
+                // FIXME: we should not default to 0!
+                let mut init = SymExpr::from(BitVec::from(0u8));
+
+                for caddr in addrs.iter().cloned() {
+                    let addrv = caddr.to_u64().expect("64-bit address limit") + (i as u64);
+                    let cval =
+                        self.read_memory_expr(self.solver.translator().address(addrv).into(), 8)?;
+                    let cond = SymExpr::eq(addr.clone(), caddr.into());
+                    init = SymExpr::ite(cond, cval, init);
+                }
+
+                bytes.push(init);
+            }
+
+            Ok(bytes)
+        }
+    }
+
     fn write_memory_symbolic_aux(
         &mut self,
         aexpr: SymExpr,
@@ -1619,5 +1654,86 @@ impl<O: Order> ConcolicState<O> {
         }
 
         Ok(())
+    }
+
+    pub fn search_memory_symbolic(&mut self, addr: &SymExpr, needle: &SymExpr, bytes: &SymExpr) -> Result<SymExpr, Error> {
+        let buffer_len = bytes.maximise(&mut self.solver, &self.constraints)
+            .ok_or_else(|| Error::UnsatVariable(bytes.clone()))?
+            .to_usize()
+            .expect("buffer maximum length exceeds usize");
+
+        let needle_bits = needle.bits() as usize;
+        let needle_bytes = needle_bits / 8;
+        let address_bits = addr.bits() as usize;
+
+        let mut cond = SymExpr::val(true);
+        let mut retn = SymExpr::val(false);
+
+        for i in 0..(buffer_len - needle_bytes) {
+            let pos = addr + &SymExpr::val(BitVec::from_usize(i, address_bits));
+            let val = self.read_memory_symbolic(&pos, needle_bits)?;
+
+            let pcond = val.clone().lt(addr + &bytes) & !val.clone().lt(addr.clone());
+            let ncond = val.clone().eq(needle.clone()) & pcond & !&cond;
+
+            retn = SymExpr::ite(ncond, val.clone(), retn);
+            cond = val.clone().eq(needle.clone()) | cond;
+
+            if retn.is_true() || val == *needle {
+                break
+            }
+        }
+
+        Ok(retn)
+    }
+
+    pub fn compare_memory_symbolic(&mut self, addr1: &SymExpr, addr2: &SymExpr, bytes: &SymExpr) -> Result<SymExpr, Error> {
+        let buffer_len = bytes.maximise(&mut self.solver, &self.constraints)
+            .ok_or_else(|| Error::UnsatVariable(bytes.clone()))?
+            .to_usize()
+            .expect("buffer maximum length exceeds usize");
+
+        let buffer1 = self.read_memory_symbolic_bytes(addr1, buffer_len)?;
+        let buffer2 = self.read_memory_symbolic_bytes(addr2, buffer_len)?;
+
+        let length_bits = bytes.bits() as usize;
+
+        let mut cond = SymExpr::val(true);
+        let mut retn = SymExpr::val(false);
+
+        for i in 0..buffer_len {
+            let b1 = &buffer1[i];
+            let b2 = &buffer2[i];
+
+            let idx = SymExpr::from(BitVec::from_usize(i, length_bits));
+
+            let is_eq = b1.clone().eq(b2.clone());
+            let is_lt = b1.clone().lt(b2.clone());
+
+            let is_gt = !&is_lt & !&is_eq;
+            let is_lt = is_lt & !is_eq;
+
+            let len_cond = idx.lt(bytes.clone());
+
+            let lt_val = SymExpr::ite(
+                is_lt & cond.clone() & len_cond.clone(),
+                SymExpr::from(BitVec::from(0xffu8)),
+                retn,
+            );
+
+            retn = SymExpr::ite(
+                is_gt & cond.clone() & len_cond,
+                SymExpr::from(BitVec::from(0x1u8)),
+                lt_val,
+            );
+
+            cond = cond & retn.clone().eq(SymExpr::from(BitVec::from(0u8)));
+
+            if cond.is_true() {
+                break
+            }
+        }
+
+        Ok(retn)
     }
 }

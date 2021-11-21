@@ -211,8 +211,12 @@ impl<'c, 'ecode> VisitRef<'ecode> for ToAst<'c> {
 pub trait Value {
     fn ast(&self, ctxt: &mut SolverContext) -> BV<Arc<Btor>>;
     fn simplify(&self) -> SymExpr;
+
     fn solve(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Option<BitVec>;
     fn solve_many(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Vec<BitVec>;
+
+    fn minimise(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Option<BitVec>;
+    fn maximise(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Option<BitVec>;
 }
 
 impl Value for SymExpr {
@@ -279,6 +283,86 @@ impl Value for SymExpr {
 
             ctxt.solver().pop(1);
             acc
+        }
+    }
+
+    fn minimise(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Option<BitVec> {
+        let nx = self.simplify();
+        if let Expr::Val(nx) = &*nx {
+            Some(nx.clone())
+        } else {
+            ctxt.solver.push(1);
+
+            for constraint in constraints.iter() {
+                constraint.ast(ctxt).slice(0, 0).assert();
+            }
+
+            let ast = nx.ast(ctxt);
+            let var = BV::new(ctxt.solver(), ast.get_width(), None);
+
+            var._eq(&ast).assert();
+
+            let bits = self.bits();
+
+            let mut low = BitVec::zero(bits as usize);
+            let mut high = BitVec::one(bits as usize) << (bits - 1);
+            let two = BitVec::from_u32(2, bits as usize);
+
+            while high != low {
+                var.ult(&SymExpr::val(high.clone()).ast(ctxt)).assume();
+                while ctxt.solver().sat() == SolverResult::Sat && high != low {
+                    high = &low + &(&(&high - &low) / &two);
+                    var.ult(&SymExpr::val(high.clone()).ast(ctxt)).assume();
+                }
+
+                let tmp = high.clone();
+                high = &high + &(&(&high - &low) / &two);
+                low = tmp;
+            }
+
+            ctxt.solver().pop(1);
+
+            Some(low)
+        }
+    }
+
+    fn maximise(&self, ctxt: &mut SolverContext, constraints: &[SymExpr]) -> Option<BitVec> {
+        let nx = self.simplify();
+        if let Expr::Val(nx) = &*nx {
+            Some(nx.clone())
+        } else {
+            ctxt.solver.push(1);
+
+            for constraint in constraints.iter() {
+                constraint.ast(ctxt).slice(0, 0).assert();
+            }
+
+            let ast = nx.ast(ctxt);
+            let var = BV::new(ctxt.solver(), ast.get_width(), None);
+
+            var._eq(&ast).assert();
+
+            let bits = self.bits();
+
+            let mut low = BitVec::zero(bits as usize);
+            let mut high = BitVec::one(bits as usize) << (bits - 1);
+            let two = BitVec::from_u32(2, bits as usize);
+
+            while high != low {
+                var.ugte(&SymExpr::val(high.clone()).ast(ctxt)).assume();
+                while ctxt.solver().sat() == SolverResult::Sat && high != low {
+                    high = &low + &(&(&high - &low) / &two);
+                    var.ugte(&SymExpr::val(high.clone()).ast(ctxt)).assume();
+                }
+
+                let tmp = high.clone();
+                high = &high + &(&(&high - &low) / &two);
+                low = tmp;
+            }
+
+            ctxt.solver().pop(1);
+
+            Some(low)
         }
     }
 }
