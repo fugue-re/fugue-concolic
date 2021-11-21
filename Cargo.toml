@@ -12,6 +12,7 @@ loader-radare = ["fuguex/loader-radare"]
 
 [dependencies]
 boolector = "0.4"
+boolector-sys = { version = "0.6.3", features = ["vendor-lgl"] }
 disjoint-interval-tree = { version = "0.1", registry = "fugue" }
 dyn-clone = "1"
 either = "1"
