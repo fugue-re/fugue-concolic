@@ -5,4 +5,5 @@ pub mod machine;
 pub mod pointer;
 pub mod solver;
 pub mod state;
+pub mod util;
 pub mod value;

@@ -1601,6 +1601,10 @@ impl<O: Order> ConcolicState<O> {
             let mut bytes = Vec::new();
 
             for i in 0..count {
+                let abits = addr.bits() as usize;
+                let cidx = BitVec::from_usize(i, abits);
+                let sidx = SymExpr::from(cidx.clone());
+
                 // FIXME: we should not default to 0!
                 let mut init = SymExpr::from(BitVec::from(0u8));
 
@@ -1608,7 +1612,7 @@ impl<O: Order> ConcolicState<O> {
                     let addrv = caddr.to_u64().expect("64-bit address limit") + (i as u64);
                     let cval =
                         self.read_memory_expr(self.solver.translator().address(addrv).into(), 8)?;
-                    let cond = SymExpr::eq(addr.clone(), caddr.into());
+                    let cond = SymExpr::eq(&addr + &sidx, (&caddr + &cidx).into());
                     init = SymExpr::ite(cond, cval, init);
                 }
 
