@@ -1,6 +1,6 @@
 [package]
 name = "fugue-concolic"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2018"
 
 [features]
@@ -15,7 +15,7 @@ static-boolector = ["boolector-sys/vendor-lgl"]
 
 [dependencies]
 boolector = "0.4"
-boolector-sys = { version = "0.6.3", optional = true }
+boolector-sys = { version = "0.7", optional = true }
 disjoint-interval-tree = { version = "0.1", registry = "fugue" }
 dyn-clone = "1"
 either = "1"

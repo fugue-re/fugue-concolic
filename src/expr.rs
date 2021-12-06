@@ -318,7 +318,7 @@ impl SymExpr {
         EXPR.mk(Expr::IVar(ivar)).into()
     }
 
-    fn lift_unop(op: UnOp, v: SymExpr) -> SymExpr {
+    pub fn lift_unop(op: UnOp, v: SymExpr) -> SymExpr {
         EXPR.mk(Expr::UnOp(op, v)).into()
     }
 
@@ -376,7 +376,7 @@ impl SymExpr {
     }
 
 
-    fn lift_binop(op: BinOp, l: SymExpr, r: SymExpr) -> SymExpr {
+    pub fn lift_binop(op: BinOp, l: SymExpr, r: SymExpr) -> SymExpr {
         assert_eq!(l.bits(), r.bits());
 
         EXPR.mk(Expr::BinOp(op, l, r)).into()
@@ -660,11 +660,11 @@ impl SymExpr {
         }
     }
 
-    fn cast(e: SymExpr, c: Cast) -> SymExpr {
+    pub fn cast(e: SymExpr, c: Cast) -> SymExpr {
         EXPR.mk(Expr::Cast(e, c)).into()
     }
 
-    fn lift_unrel(op: UnRel, e: SymExpr) -> SymExpr {
+    pub fn lift_unrel(op: UnRel, e: SymExpr) -> SymExpr {
         EXPR.mk(Expr::UnRel(op, e)).into()
     }
 
@@ -679,7 +679,7 @@ impl SymExpr {
         EXPR.mk(Expr::IfElse(self, texpr, fexpr)).into()
     }
 
-    fn lift_binrel(op: BinRel, l: SymExpr, r: SymExpr) -> SymExpr {
+    pub fn lift_binrel(op: BinRel, l: SymExpr, r: SymExpr) -> SymExpr {
         assert_eq!(l.bits(), r.bits());
 
         EXPR.mk(Expr::BinRel(op, l, r)).into()
