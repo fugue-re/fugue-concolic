@@ -10,12 +10,10 @@ loader-ghidra = ["fuguex/loader-ghidra"]
 loader-idapro = ["fuguex/loader-idapro"]
 loader-radare = ["fuguex/loader-radare"]
 
-shared-boolector = ["boolector-sys"]
-static-boolector = ["boolector-sys/vendor-lgl"]
+static-boolector = ["boolector/vendor-lgl"]
 
 [dependencies]
 boolector = "0.4"
-boolector-sys = { version = "0.7", optional = true }
 disjoint-interval-tree = { version = "0.1", registry = "fugue" }
 dyn-clone = "1"
 either = "1"
