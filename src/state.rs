@@ -406,9 +406,9 @@ impl<O: Order> ConcolicState<O> {
 
         let lcons = take(&mut self.constraints)
             .into_iter()
-            .fold1(SymExpr::bool_and)
+            .reduce(SymExpr::bool_and)
             .unwrap();
-        let rcons = other.constraints.into_iter().fold1(SymExpr::bool_and).unwrap();
+        let rcons = other.constraints.into_iter().reduce(SymExpr::bool_and).unwrap();
 
         let constraints = SymExpr::bool_or(lcons.clone(), rcons.clone());
 
@@ -1351,9 +1351,9 @@ impl<O: Order> ConcolicState<O> {
     ) -> Result<Option<SymExpr>, S::Error> {
         let buffer = Self::read_bytes(pages, concs, at, T::SIZEOF)?;
         Ok(if O::ENDIAN == Endian::Big {
-            buffer.into_iter().fold1(|acc, v| SymExpr::concat(acc, v))
+            buffer.into_iter().reduce(|acc, v| SymExpr::concat(acc, v))
         } else {
-            buffer.into_iter().fold1(|acc, v| SymExpr::concat(v, acc))
+            buffer.into_iter().reduce(|acc, v| SymExpr::concat(v, acc))
         })
     }
 
@@ -1520,12 +1520,12 @@ impl<O: Order> ConcolicState<O> {
         let vals = self.read_symbolic_operand_bytes(operand);
         let expr = if O::ENDIAN.is_big() {
             vals.into_iter()
-                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .reduce(|acc, v| SymExpr::concat(acc, v))
                 .unwrap()
         } else {
             vals.into_iter()
                 .rev()
-                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .reduce(|acc, v| SymExpr::concat(acc, v))
                 .unwrap()
         };
         Ok(expr)
@@ -1535,12 +1535,12 @@ impl<O: Order> ConcolicState<O> {
         let vals = self.read_operand_bytes(operand)?;
         let expr = if O::ENDIAN.is_big() {
             vals.into_iter()
-                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .reduce(|acc, v| SymExpr::concat(acc, v))
                 .unwrap()
         } else {
             vals.into_iter()
                 .rev()
-                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .reduce(|acc, v| SymExpr::concat(acc, v))
                 .unwrap()
         };
         Ok(expr)
@@ -1550,12 +1550,12 @@ impl<O: Order> ConcolicState<O> {
         let vals = self.read_memory_bytes(addr, bits / 8)?;
         let expr = if O::ENDIAN.is_big() {
             vals.into_iter()
-                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .reduce(|acc, v| SymExpr::concat(acc, v))
                 .unwrap()
         } else {
             vals.into_iter()
                 .rev()
-                .fold1(|acc, v| SymExpr::concat(acc, v))
+                .reduce(|acc, v| SymExpr::concat(acc, v))
                 .unwrap()
         };
         Ok(expr)

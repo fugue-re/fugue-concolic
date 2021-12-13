@@ -5,7 +5,7 @@ use fugue::bytes::Order;
 use fugue::ir::{AddressValue, IntoAddress, Translator};
 use fugue::ir::il::Location;
 
-use fuguex::loader::MappedDatabase;
+use fuguex::loader::LoaderMapping;
 use fuguex::machine::{Branch, Machine};
 use fuguex::machine::types::{Bound, StepOutcome};
 use fuguex::state::pcode::PCodeState;
@@ -75,7 +75,7 @@ impl<O: Order, const OPERAND_SIZE: usize> ConcolicMachine<O, DefaultPointerStrat
         }
     }
 
-    pub fn new_from(loader: MappedDatabase<PCodeState<u8, O>>) -> Self {
+    pub fn new_from(loader: impl LoaderMapping<PCodeState<u8, O>>) -> Self {
         let translator = loader.translator();
         Self::new_with(translator, loader.into_state(), DefaultPointerStrategy::default())
     }
@@ -92,7 +92,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         }
     }
 
-    pub fn new_from_with(loader: MappedDatabase<PCodeState<u8, O>>, pointer_strategy: P) -> Self {
+    pub fn new_from_with(loader: impl LoaderMapping<PCodeState<u8, O>>, pointer_strategy: P) -> Self {
         let translator = loader.translator();
         Self::new_with(translator, loader.into_state(), pointer_strategy)
     }

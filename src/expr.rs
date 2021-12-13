@@ -12,6 +12,7 @@ use fnv::FnvHashMap as HashMap;
 use fugue::bv::BitVec;
 use fugue::fp::FloatFormat;
 use fugue::ir::il::ecode::{BinOp, BinRel, Cast, UnOp, UnRel, Var};
+use fugue::ir::il::traits::*;
 use fugue::ir::space::AddressSpaceId;
 
 use smallvec::SmallVec;
@@ -104,7 +105,10 @@ pub enum Expr {
     Cast(SymExpr, Cast), // T -> Cast::T
     Load(SymExpr, usize, AddressSpaceId), // SPACE[T]:SIZE -> T
 
+    ExtractLow(SymExpr, u32),
+    ExtractHigh(SymExpr, u32),
     Extract(SymExpr, u32, u32), // T T[LSB..MSB) -> T
+
     Concat(SymExpr, SymExpr),   // T * T -> T
 
     IfElse(SymExpr, SymExpr, SymExpr),
@@ -124,14 +128,14 @@ impl Expr {
             Expr::Var(v) => write!(f, "{}", v),
             Expr::IVar(v) => write!(f, "{}", v),
 
-            Expr::Cast(expr, Cast::High(bits)) => write!(f, "extract-msb({}, bits={})", expr, bits),
-            Expr::Cast(expr, Cast::Low(bits)) => write!(f, "extract-lsb({}, bits={})", expr, bits),
 
             Expr::Cast(expr, Cast::Bool) => { expr.fmt_l1(f)?; write!(f, " as bool") },
             Expr::Cast(expr, Cast::Signed(bits)) => { expr.fmt_l1(f)?;  write!(f, " as i{}", bits) },
             Expr::Cast(expr, Cast::Unsigned(bits)) => { expr.fmt_l1(f)?; write!(f, " as u{}", bits) },
             Expr::Cast(expr, Cast::Float(format)) => { expr.fmt_l1(f)?; write!(f, " as f{}", format.bits()) },
 
+            Expr::ExtractLow(expr, bits) => write!(f, "extract-low({}, bits={})", expr, bits),
+            Expr::ExtractHigh(expr, bits) => write!(f, "extract-high({}, bits={})", expr, bits),
             Expr::Extract(expr, lsb, msb) => write!(f, "extract({}, from={}, to={})", expr, lsb, msb),
             Expr::UnOp(UnOp::ABS, expr) => write!(f, "abs({})", expr),
             Expr::UnOp(UnOp::SQRT, expr) => write!(f, "sqrt({})", expr),
@@ -562,7 +566,7 @@ impl SymExpr {
         } else if let Expr::Val(ref bv) = &*self {
             Self::val(bv.clone().unsigned() >> (bv.bits() as u32 - bits))
         } else {
-            EXPR.mk(Expr::Cast(self, Cast::High(bits as usize))).into()
+            EXPR.mk(Expr::ExtractHigh(self, bits)).into()
         }
     }
 
@@ -574,7 +578,7 @@ impl SymExpr {
         } else if let Expr::Val(ref bv) = &*self {
             Self::val(bv.unsigned_cast(bits as usize))
         } else {
-            EXPR.mk(Expr::Cast(self, Cast::Low(bits as usize))).into()
+            EXPR.mk(Expr::ExtractLow(self, bits)).into()
         }
     }
 
@@ -888,6 +892,8 @@ impl SymExpr {
             Expr::IfElse(_, ref l, _) => l.bits(),
             Expr::Intrinsic(_, _, bits) => *bits as u32,
             Expr::Concat(ref l, ref r) => l.bits() + r.bits(),
+            Expr::ExtractLow(_, bits) |
+            Expr::ExtractHigh(_, bits) => *bits,
             Expr::Extract(_, lsb, msb) => msb - lsb,
             Expr::Load(_, bits, _) => *bits as u32,
         }
@@ -1212,6 +1218,16 @@ pub trait VisitRef<'expr> {
         self.visit_expr_ref(expr);
     }
 
+    #[allow(unused_variables)]
+    fn visit_extract_low_ref(&mut self, expr: &'expr SymExpr, bits: u32) {
+        self.visit_expr_ref(expr);
+    }
+
+    #[allow(unused_variables)]
+    fn visit_extract_high_ref(&mut self, expr: &'expr SymExpr, bits: u32) {
+        self.visit_expr_ref(expr);
+    }
+
     fn visit_concat_ref(&mut self, lexpr: &'expr SymExpr, rexpr: &'expr SymExpr) {
         self.visit_expr_ref(lexpr);
         self.visit_expr_ref(rexpr);
@@ -1244,6 +1260,8 @@ pub trait VisitRef<'expr> {
             Expr::BinOp(op, ref l, ref r) => self.visit_binop_ref(op, l, r),
             Expr::UnRel(op, ref e) => self.visit_unrel_ref(op, e),
             Expr::BinRel(op, ref l, ref r) => self.visit_binrel_ref(op, l, r),
+            Expr::ExtractLow(ref e, bits) => self.visit_extract_low_ref(e, bits),
+            Expr::ExtractHigh(ref e, bits) => self.visit_extract_high_ref(e, bits),
             Expr::Extract(ref e, lsb, msb) => self.visit_extract_ref(e, lsb, msb),
             Expr::Concat(ref l, ref r) => self.visit_concat_ref(l, r),
             Expr::IfElse(ref c, ref l, ref r) => self.visit_ite_ref(c, l, r),
@@ -1292,6 +1310,14 @@ pub trait VisitMap<'expr> {
         SymExpr::cast(self.visit_expr(expr), cast.clone())
     }
 
+    fn visit_extract_low(&mut self, expr: &'expr SymExpr, bits: u32) -> SymExpr {
+        self.visit_expr(expr).extract_low(bits)
+    }
+
+    fn visit_extract_high(&mut self, expr: &'expr SymExpr, bits: u32) -> SymExpr {
+        self.visit_expr(expr).extract_high(bits)
+    }
+
     fn visit_extract(&mut self, expr: &'expr SymExpr, lsb: u32, msb: u32) -> SymExpr {
         self.visit_expr(expr).extract(lsb, msb)
     }
@@ -1322,6 +1348,8 @@ pub trait VisitMap<'expr> {
             Expr::UnRel(op, e) => self.visit_unrel(*op, e),
             Expr::BinRel(op, l, r) => self.visit_binrel(*op, l, r),
             Expr::IfElse(ref c, ref l, ref r) => self.visit_ite(c, l, r),
+            Expr::ExtractLow(e, bits) => self.visit_extract_low(e, *bits),
+            Expr::ExtractHigh(e, bits) => self.visit_extract_high(e, *bits),
             Expr::Extract(e, lsb, msb) => self.visit_extract(e, *lsb, *msb),
             Expr::Concat(l, r) => self.visit_concat(l, r),
             Expr::Cast(e, c) => self.visit_cast(e, c),

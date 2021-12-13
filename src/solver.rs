@@ -3,6 +3,7 @@ use boolector::option::{BtorOption, ModelGen};
 
 use fugue::ir::Translator;
 use fugue::ir::il::ecode::Var;
+use fugue::ir::il::traits::*;
 
 use fxhash::FxHashMap as HashMap;
 use std::sync::Arc;

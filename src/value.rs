@@ -171,6 +171,21 @@ impl<'c, 'ecode> VisitRef<'ecode> for ToAst<'c> {
         self.value = Some(lvalue.concat(&rvalue))
     }
 
+    fn visit_extract_low_ref(&mut self, expr: &'ecode SymExpr, bits: u32) {
+        self.visit_expr_ref(&expr);
+        let value = self.value();
+
+        self.value = Some(value.slice(bits - 1, 0))
+    }
+
+    fn visit_extract_high_ref(&mut self, expr: &'ecode SymExpr, bits: u32) {
+        self.visit_expr_ref(&expr);
+        let value = self.value();
+
+        let hbit = expr.bits() as u32;
+        self.value = Some(value.slice(hbit - 1, hbit - bits))
+    }
+
     fn visit_extract_ref(&mut self, expr: &'ecode SymExpr, lsb: u32, msb: u32) {
         self.visit_expr_ref(&expr);
         let value = self.value();
@@ -184,11 +199,6 @@ impl<'c, 'ecode> VisitRef<'ecode> for ToAst<'c> {
 
         self.value = Some(match cast {
             Cast::Bool => value.slice(0, 0).uext(7),
-            Cast::Low(bits) => value.slice(*bits as u32 - 1, 0),
-            Cast::High(bits) => {
-                let hbit = expr.bits() as u32;
-                value.slice(hbit - 1, hbit - *bits as u32)
-            },
             Cast::Signed(bits) => if expr.bits() < *bits as u32 {
                 value.sext((*bits as u32 - expr.bits()) as u32)
             } else if expr.bits() > *bits as u32 {
@@ -196,14 +206,14 @@ impl<'c, 'ecode> VisitRef<'ecode> for ToAst<'c> {
             } else {
                 value
             },
-            Cast::Unsigned(bits) => if expr.bits() < *bits as u32 {
+            Cast::Unsigned(bits) | Cast::Pointer(_, bits) => if expr.bits() < *bits as u32 {
                 value.uext((*bits as u32 - expr.bits()) as u32)
             } else if expr.bits() > *bits as u32 {
                 value.slice(*bits as u32 - 1, 0)
             } else {
                 value
             },
-            Cast::Float(_) => panic!("unsupported cast: {:?}", cast)
+            _ => panic!("unsupported cast: {:?}", cast)
         })
     }
 }
