@@ -1,6 +1,6 @@
 [package]
 name = "fugue-concolic"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2018"
 
 [features]
@@ -10,10 +10,16 @@ loader-ghidra = ["fuguex/loader-ghidra"]
 loader-idapro = ["fuguex/loader-idapro"]
 loader-radare = ["fuguex/loader-radare"]
 
-static-boolector = ["boolector/vendor-lgl"]
+solver-boolector = ["boolector"]
+solver-static-boolector = ["solver-boolector", "boolector/vendor-lgl"]
+
+solver-z3 = ["z3"]
+solver-static-z3 = ["solver-z3", "z3/static-link-z3"]
+
+default = ["solver-static-boolector"]
 
 [dependencies]
-boolector = "0.4"
+boolector = { version = "0.4", optional = true }
 disjoint-interval-tree = { version = "0.1", registry = "fugue" }
 dyn-clone = "1"
 either = "1"
@@ -28,3 +34,7 @@ log = "0.4"
 parking_lot = "0.11"
 smallvec = "1"
 thiserror = "1"
+z3 = { version = "0.11", optional = true }
+
+[patch.crates-io]
+boolector = { git = "https://github.com/xorpse/boolector-rs.git" }
