@@ -19,7 +19,7 @@ solver-static-z3 = ["solver-z3", "z3/static-link-z3"]
 default = ["solver-static-boolector"]
 
 [dependencies]
-boolector = { version = "0.4.2", git = "https://github.com/xorpse/boolector-rs.git", optional = true }
+boolector = { version = "0.4.2", registry = "fugue", optional = true }
 disjoint-interval-tree = { version = "0.1", registry = "fugue" }
 dyn-clone = "1"
 either = "1"
