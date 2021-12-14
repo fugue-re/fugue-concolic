@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use either::Either;
@@ -22,11 +23,11 @@ use parking_lot::RwLock;
 
 use thiserror::Error;
 
+use crate::backend::ValueSolver;
 use crate::expr::SymExpr;
 use crate::hooks::ClonableHookConcolic;
 use crate::pointer::SymbolicPointerStrategy;
 use crate::state::{ConcolicState, Error as StateError};
-use crate::value::Value;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -54,33 +55,33 @@ pub enum Error {
     UnsupportedOperandSize(usize, usize),
 }
 
-pub enum NextLocation<O: Order> {
-    Symbolic(Vec<(Branch, ConcolicState<O>)>),
-    Concrete(Branch),
+pub enum NextLocation<'ctx, O: Order, VS: ValueSolver<'ctx>> {
+    Symbolic(Vec<(Branch, ConcolicState<'ctx, O, VS>)>),
+    Concrete(Branch, PhantomData<&'ctx VS>),
 }
 
-impl<O: Order> NextLocation<O> {
-    fn join(self, tstate: ConcolicState<O>, fbranch: Branch, fstate: ConcolicState<O>) -> Self {
+impl<'ctx, O: Order, VS: ValueSolver<'ctx>> NextLocation<'ctx, O, VS> {
+    fn join(self, tstate: ConcolicState<'ctx, O, VS>, fbranch: Branch, fstate: ConcolicState<'ctx, O, VS>) -> Self {
         match self {
             Self::Symbolic(mut states) => {
                 states.push((fbranch, fstate));
                 Self::Symbolic(states)
             },
-            Self::Concrete(tbranch) => {
+            Self::Concrete(tbranch, _) => {
                 Self::Symbolic(vec![(tbranch, tstate), (fbranch, fstate)])
             }
         }
     }
 
     fn unwrap_concrete_address(self) -> AddressValue {
-        if let Self::Concrete(Branch::Global(address)) = self {
+        if let Self::Concrete(Branch::Global(address), _) = self {
             address
         } else {
             panic!("expected NextLocation::Concrete(Branch::Global(_))")
         }
     }
 
-    fn unwrap_symbolic(self) -> Vec<(Branch, ConcolicState<O>)> {
+    fn unwrap_symbolic(self) -> Vec<(Branch, ConcolicState<'ctx, O, VS>)> {
         if let Self::Symbolic(states) = self {
             states
         } else {
@@ -89,35 +90,35 @@ impl<O: Order> NextLocation<O> {
     }
 }
 
-pub type Outcomes<O> = Vec<(Branch, ConcolicState<O>)>;
+pub type Outcomes<'ctx, O, VS> = Vec<(Branch, ConcolicState<'ctx, O, VS>)>;
 
 #[derive(Clone)]
-pub struct ConcolicContext<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> {
+pub struct ConcolicContext<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize> {
     hooks: Vec<
-        Box<dyn ClonableHookConcolic<State = ConcolicState<O>, Error = StateError, Outcome = Outcomes<O>>>,
+        Box<dyn ClonableHookConcolic<State = ConcolicState<'ctx, O, VS>, Error = StateError, Outcome = Outcomes<'ctx, O, VS>> + 'ctx>,
     >,
     program_counter: Arc<Operand>,
-    state: ConcolicState<O>,
+    state: ConcolicState<'ctx, O, VS>,
     pointer_strategy: P,
     translator: Arc<Translator>,
     translator_context: ContextDatabase,
     translator_cache: Arc<RwLock<HashMap<Address, StepState>>>,
-    intrinsics: IntrinsicHandler<Outcomes<O>, ConcolicState<O>>,
+    intrinsics: IntrinsicHandler<Outcomes<'ctx, O, VS>, ConcolicState<'ctx, O, VS>>,
 }
 
 trait ToSignedBytes {
-    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
+    fn expand_as<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<'ctx, O, VS, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error>;
 }
 
 impl ToSignedBytes for bool {
-    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
+    fn expand_as<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<'ctx, O, VS, P, { OPERAND_SIZE }>,
         dest: &Operand,
         _signed: bool,
     ) -> Result<(), Error> {
@@ -138,9 +139,9 @@ impl ToSignedBytes for bool {
 }
 
 impl ToSignedBytes for BitVec {
-    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
+    fn expand_as<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<'ctx, O, VS, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error> {
@@ -174,9 +175,9 @@ impl ToSignedBytes for BitVec {
 }
 
 impl ToSignedBytes for SymExpr {
-    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
+    fn expand_as<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<'ctx, O, VS, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error> {
@@ -213,9 +214,9 @@ where
     L: ToSignedBytes,
     R: ToSignedBytes,
 {
-    fn expand_as<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize>(
+    fn expand_as<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize>(
         self,
-        ctxt: &mut ConcolicContext<O, P, { OPERAND_SIZE }>,
+        ctxt: &mut ConcolicContext<'ctx, O, VS, P, { OPERAND_SIZE }>,
         dest: &Operand,
         signed: bool,
     ) -> Result<(), Error> {
@@ -226,13 +227,13 @@ where
     }
 }
 
-impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> ConcolicContext<O, P, { OPERAND_SIZE }> {
-    pub fn new(translator: Arc<Translator>, state: PCodeState<u8, O>, pointer_strategy: P) -> Self {
+impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize> ConcolicContext<'ctx, O, VS, P, { OPERAND_SIZE }> {
+    pub fn new(solver: VS, translator: Arc<Translator>, state: PCodeState<u8, O>, pointer_strategy: P) -> Self {
         Self {
             hooks: Vec::new(),
             intrinsics: IntrinsicHandler::new(),
             program_counter: state.registers().program_counter(),
-            state: ConcolicState::new(translator.clone(), state),
+            state: ConcolicState::new(solver, translator.clone(), state),
             pointer_strategy,
             translator_cache: Arc::new(RwLock::new(HashMap::default())),
             translator_context: translator.context_database(),
@@ -242,8 +243,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
 
     pub fn add_hook<H>(&mut self, hook: H)
     where
-        H: ClonableHookConcolic<State = ConcolicState<O>, Error = StateError, Outcome = Outcomes<O>>
-            + 'static,
+        H: ClonableHookConcolic<State = ConcolicState<'ctx, O, VS>, Error = StateError, Outcome = Outcomes<'ctx, O, VS>> + 'ctx,
     {
         self.hooks.push(Box::new(hook));
     }
@@ -252,15 +252,15 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         self.state.push_constraint(constraint);
     }
 
-    pub fn state(&self) -> &ConcolicState<O> {
+    pub fn state(&self) -> &ConcolicState<'ctx, O, VS> {
         &self.state
     }
 
-    pub fn state_mut(&mut self) -> &mut ConcolicState<O> {
+    pub fn state_mut(&mut self) -> &mut ConcolicState<'ctx, O, VS> {
         &mut self.state
     }
 
-    pub fn branch_expr(state: &mut ConcolicState<O>, expr: SymExpr) -> Result<NextLocation<O>, Error> {
+    pub fn branch_expr(state: &mut ConcolicState<'ctx, O, VS>, expr: SymExpr) -> Result<NextLocation<'ctx, O, VS>, Error> {
         let mut states = Vec::new();
         let value = expr.simplify();
 
@@ -285,28 +285,28 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         }
     }
 
-    pub fn ibranch_on(state: &mut ConcolicState<O>, pc: &Operand) -> Result<NextLocation<O>, Error> {
+    pub fn ibranch_on(state: &mut ConcolicState<'ctx, O, VS>, pc: &Operand) -> Result<NextLocation<'ctx, O, VS>, Error> {
         match state.read_operand_value(pc)? {
             Either::Left(bv) => {
                 let memory_space = state.concrete.memory_space_ref();
                 let location = Branch::Global(bv.into_address_value(memory_space));
-                Ok(NextLocation::Concrete(location))
+                Ok(NextLocation::Concrete(location, PhantomData))
             }
             Either::Right(expr) => Self::branch_expr(state, expr),
         }
     }
 
-    pub fn branch_on(state: &mut ConcolicState<O>, pc: &Operand) -> Result<NextLocation<O>, Error> {
+    pub fn branch_on(state: &mut ConcolicState<'ctx, O, VS>, pc: &Operand) -> Result<NextLocation<'ctx, O, VS>, Error> {
         if let Operand::Address { value, .. } = pc {
             let memory_space = state.concrete.memory_space_ref();
             let address = value.into_address_value(memory_space);
-            Ok(NextLocation::Concrete(Branch::Global(address)))
+            Ok(NextLocation::Concrete(Branch::Global(address), PhantomData))
         } else {
             match state.read_operand_value(pc)? {
                 Either::Left(bv) => {
                     let memory_space = state.concrete.memory_space_ref();
                     let location = Branch::Global(bv.into_address_value(memory_space));
-                    Ok(NextLocation::Concrete(location))
+                    Ok(NextLocation::Concrete(location, PhantomData))
                 }
                 Either::Right(expr) => Self::branch_expr(state, expr),
             }
@@ -329,7 +329,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
 
     fn with_return_location<U, F>(&mut self, f: F) -> Result<U, Error>
     where
-        F: FnOnce(&mut ConcolicState<O>, Either<Operand, SymExpr>) -> Result<U, Error>,
+        F: FnOnce(&mut ConcolicState<'ctx, O, VS>, Either<Operand, SymExpr>) -> Result<U, Error>,
     {
         let rloc = (*self.state.concrete.registers().return_location()).clone();
         match rloc {
@@ -355,7 +355,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         }
     }
 
-    fn skip_return(&mut self) -> Result<NextLocation<O>, Error> {
+    fn skip_return(&mut self) -> Result<NextLocation<'ctx, O, VS>, Error> {
         // NOTE: for x86, etc. we need to clean-up the stack
         // arguments; currently, this is the responsibility of
         // hooks that issue a `HookCallAction::Skip`.
@@ -392,7 +392,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         ops: COS,
         dest: &Operand,
         rhs: &Operand,
-    ) -> Result<Outcome<Outcomes<O>>, Error>
+    ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(bool) -> Result<COCO, Error>,
         COS: FnOnce(SymExpr) -> Result<COSO, Error>,
@@ -426,7 +426,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         dest: &Operand,
         lhs: &Operand,
         rhs: &Operand,
-    ) -> Result<Outcome<Outcomes<O>>, Error>
+    ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(bool, bool) -> Result<COCO, Error>,
         COS: FnOnce(SymExpr, SymExpr) -> Result<COSO, Error>,
@@ -485,7 +485,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         dest: &Operand,
         rhs: &Operand,
         signed: bool,
-    ) -> Result<Outcome<Outcomes<O>>, Error>
+    ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(BitVec) -> Result<COCO, Error>,
         COS: FnOnce(SymExpr) -> Result<COSO, Error>,
@@ -527,7 +527,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         lhs: &Operand,
         rhs: &Operand,
         signed: bool,
-    ) -> Result<Outcome<Outcomes<O>>, Error>
+    ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(BitVec, BitVec) -> Result<COCO, Error>,
         COS: FnOnce(SymExpr, SymExpr) -> Result<COSO, Error>,
@@ -602,7 +602,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         ops: COS,
         dest: &Operand,
         rhs: &Operand,
-    ) -> Result<Outcome<Outcomes<O>>, Error>
+    ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(Float, &FloatFormat) -> Result<COCO, Error>,
         COS: FnOnce(SymExpr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
@@ -624,7 +624,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         let value = match self.state.read_operand_value(rhs)? {
             Either::Left(bv) => Either::Left(opc(format.from_bitvec(&bv), &format)?),
             Either::Right(expr) => {
-                let formats = self.state.solver.translator.float_formats();
+                let formats = self.translator.float_formats();
                 Either::Right(ops(SymExpr::cast_float(expr, Arc::new(format)), formats)?)
             }
         };
@@ -641,7 +641,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         dest: &Operand,
         lhs: &Operand,
         rhs: &Operand,
-    ) -> Result<Outcome<Outcomes<O>>, Error>
+    ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(Float, Float, &FloatFormat) -> Result<COCO, Error>,
         COS: FnOnce(SymExpr, SymExpr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
@@ -683,7 +683,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
             .read_operand_value(rhs)?
             .map_right(|expr| SymExpr::cast_float(expr, format.clone()));
 
-        let formats = self.state.solver.translator.float_formats();
+        let formats = self.translator.float_formats();
         let value = match (lhs_val, rhs_val) {
             (Either::Left(bv1), Either::Left(bv2)) => Either::Left(opc(
                 format.from_bitvec(&bv1),
@@ -704,13 +704,13 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Concoli
         Ok(Outcome::Branch(Branch::Next))
     }
 
-    pub fn restore_state(&mut self, state: ConcolicState<O>) {
+    pub fn restore_state(&mut self, state: ConcolicState<'ctx, O, VS>) {
         self.state = state;
     }
 }
 
-impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<O, P, { OPERAND_SIZE }> {
-    type State = ConcolicState<O>;
+impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, VS>, const OPERAND_SIZE: usize> Interpreter for ConcolicContext<'ctx, O, VS, P, { OPERAND_SIZE }> {
+    type State = ConcolicState<'ctx, O, VS>;
     type Error = Error;
     type Outcome = Vec<(Branch, Self::State)>;
 
@@ -755,7 +755,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Interpr
         }
 
         match Self::ibranch_on(&mut self.state, destination)? {
-            NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
+            NextLocation::Concrete(location, _) => Ok(Outcome::Branch(location)),
             NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
         }
     }
@@ -829,7 +829,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Interpr
 
                 if skip {
                     match self.skip_return()? {
-                        NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
+                        NextLocation::Concrete(location, _) => Ok(Outcome::Branch(location)),
                         NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
                     }
                 } else {
@@ -848,7 +848,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Interpr
 
     fn icall(&mut self, destination: &Operand) -> Result<Outcome<Self::Outcome>, Self::Error> {
         match Self::ibranch_on(&mut self.state, destination)? {
-            location@NextLocation::Concrete(_) => {
+            location@NextLocation::Concrete(_, _) => {
                 let mut skip = false;
                 let address_value = location.unwrap_concrete_address();
                 let address = (&address_value).into();
@@ -869,7 +869,7 @@ impl<O: Order, P: SymbolicPointerStrategy<O>, const OPERAND_SIZE: usize> Interpr
 
                 if skip {
                     match self.skip_return()? {
-                        NextLocation::Concrete(location) => Ok(Outcome::Branch(location)),
+                        NextLocation::Concrete(location, _) => Ok(Outcome::Branch(location)),
                         NextLocation::Symbolic(states) => Ok(Outcome::Halt(states)),
                     }
                 } else {

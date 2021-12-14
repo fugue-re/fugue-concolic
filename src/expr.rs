@@ -17,6 +17,8 @@ use fugue::ir::space::AddressSpaceId;
 
 use smallvec::SmallVec;
 
+use crate::backend::ValueSolver;
+
 consign! {
     let EXPR = consign(100 * 1024 /* = capacity */) for Expr;
 }
@@ -955,12 +957,37 @@ impl SymExpr {
         matches!(&**self, Expr::Cast(ref v, Cast::Bool) if v.is_zero())
     }
 
-    pub fn simplify(self) -> SymExpr {
+    pub fn simplify(&self) -> SymExpr {
         // default: rebuild + apply simplifications in ctors
         struct Simplify;
         impl<'expr> VisitMap<'expr> for Simplify {}
 
         Simplify.visit_expr(&self)
+    }
+
+    pub fn ast<'ctx, S>(&self, solver: &mut S) -> S::Value
+    where S: ValueSolver<'ctx> {
+        solver.ast(self)
+    }
+
+    pub fn solve<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Option<BitVec>
+    where S: ValueSolver<'ctx> {
+        solver.solve(self, constraints)
+    }
+
+    pub fn solve_many<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Vec<BitVec>
+    where S: ValueSolver<'ctx> {
+        solver.solve_many(self, constraints)
+    }
+
+    pub fn minimise<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Option<BitVec>
+    where S: ValueSolver<'ctx> {
+        solver.minimise(self, constraints)
+    }
+
+    pub fn maximise<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Option<BitVec>
+    where S: ValueSolver<'ctx> {
+        solver.maximise(self, constraints)
     }
 }
 

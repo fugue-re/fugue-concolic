@@ -7,6 +7,7 @@
 /// It should be trivial to switch the backing to a pure symbolic memory
 /// by returning unconstrained symbolic variables for undefined memory.
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::mem::{transmute, MaybeUninit};
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
@@ -29,9 +30,8 @@ use disjoint_interval_tree::interval_tree::IntervalSet;
 
 use thiserror::Error;
 
+use crate::backend::ValueSolver;
 use crate::expr::{Expr, IVar, SymExpr};
-use crate::solver::SolverContext;
-use crate::value::Value;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -208,8 +208,9 @@ impl Page {
 }
 
 #[derive(Clone)]
-pub struct ConcolicState<O: Order> {
-    pub(crate) solver: SolverContext,
+pub struct ConcolicState<'ctx, O: Order, VS: ValueSolver<'ctx>> {
+    pub(crate) solver: VS,
+    translator: Arc<Translator>,
     pages: BTreeMap<u64, Page>,
     registers: BTreeMap<u64, Page>,
     temporaries: BTreeMap<u64, Page>,
@@ -218,14 +219,16 @@ pub struct ConcolicState<O: Order> {
     symbolic_registers: bool,
     symbolic_temporaries: bool,
     symbolic_memory_regions: IntervalSet<u64>,
+    marker: PhantomData<&'ctx VS>,
 }
 
-impl<O: Order> State for ConcolicState<O> {
+impl<'ctx, O: Order, VS: ValueSolver<'ctx>> State for ConcolicState<'ctx, O, VS> {
     type Error = Error;
 
     fn fork(&self) -> Self {
         Self {
             solver: self.solver.clone(),
+            translator: self.translator.clone(),
             pages: self.pages.clone(),
             registers: self.registers.clone(),
             temporaries: self.temporaries.clone(),
@@ -234,6 +237,7 @@ impl<O: Order> State for ConcolicState<O> {
             symbolic_registers: self.symbolic_registers,
             symbolic_temporaries: self.symbolic_temporaries,
             symbolic_memory_regions: self.symbolic_memory_regions.clone(),
+            marker: PhantomData,
         }
     }
 
@@ -242,10 +246,11 @@ impl<O: Order> State for ConcolicState<O> {
     }
 }
 
-impl<O: Order> ConcolicState<O> {
-    pub fn new(translator: Arc<Translator>, concrete: PCodeState<u8, O>) -> Self {
+impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
+    pub fn new(solver: VS, translator: Arc<Translator>, concrete: PCodeState<u8, O>) -> Self {
         Self {
-            solver: SolverContext::new(translator),
+            solver,
+            translator,
             pages: BTreeMap::default(),
             registers: BTreeMap::default(),
             temporaries: BTreeMap::default(),
@@ -254,6 +259,7 @@ impl<O: Order> ConcolicState<O> {
             symbolic_registers: false,
             symbolic_temporaries: false,
             symbolic_memory_regions: IntervalSet::new(),
+            marker: PhantomData,
         }
     }
 
@@ -1566,7 +1572,7 @@ impl<O: Order> ConcolicState<O> {
 
         if let Expr::Val(bv) = &*addr {
             let naddr = bv.to_u64().expect("64-bit address limit");
-            self.read_memory_expr(self.solver.translator().address(naddr).into(), bits)
+            self.read_memory_expr(self.translator.address(naddr).into(), bits)
         } else {
             let addrs = addr.solve_many(&mut self.solver, &self.constraints);
             if addrs.is_empty() {
@@ -1577,7 +1583,7 @@ impl<O: Order> ConcolicState<O> {
             for caddr in addrs {
                 let addrv = caddr.to_u64().expect("64-bit address limit");
                 let cval =
-                    self.read_memory_expr(self.solver.translator().address(addrv).into(), bits)?;
+                    self.read_memory_expr(self.translator.address(addrv).into(), bits)?;
                 let cond = SymExpr::eq(addr.clone(), caddr.into());
                 init = SymExpr::ite(cond, cval, init);
             }
@@ -1591,7 +1597,7 @@ impl<O: Order> ConcolicState<O> {
 
         if let Expr::Val(bv) = &*addr {
             let naddr = bv.to_u64().expect("64-bit address limit");
-            self.read_memory_bytes(self.solver.translator().address(naddr).into(), count)
+            self.read_memory_bytes(self.translator.address(naddr).into(), count)
         } else {
             let addrs = addr.solve_many(&mut self.solver, &self.constraints);
             if addrs.is_empty() {
@@ -1611,7 +1617,7 @@ impl<O: Order> ConcolicState<O> {
                 for caddr in addrs.iter().cloned() {
                     let addrv = caddr.to_u64().expect("64-bit address limit") + (i as u64);
                     let cval =
-                        self.read_memory_expr(self.solver.translator().address(addrv).into(), 8)?;
+                        self.read_memory_expr(self.translator.address(addrv).into(), 8)?;
                     let cond = SymExpr::eq(&addr + &sidx, (&caddr + &cidx).into());
                     init = SymExpr::ite(cond, cval, init);
                 }
@@ -1645,13 +1651,13 @@ impl<O: Order> ConcolicState<O> {
 
         if let Expr::Val(bv) = &*addr {
             let naddr = bv.to_u64().expect("64-bit address limit");
-            self.write_memory_expr(self.solver.translator().address(naddr).into(), expr.clone());
+            self.write_memory_expr(self.translator.address(naddr).into(), expr.clone());
         } else {
             for caddr in addr.solve_many(&mut self.solver, &self.constraints) {
                 let addrv = caddr.to_u64().expect("64-bit address limit");
                 self.write_memory_symbolic_aux(
                     addr.clone(),
-                    self.solver.translator().address(addrv).into(),
+                    self.translator.address(addrv).into(),
                     expr.clone(),
                 )?;
             }

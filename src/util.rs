@@ -1,6 +1,7 @@
 use fugue::bytes::Order;
 use fugue::bv::BitVec;
 
+use crate::backend::ValueSolver;
 use crate::expr::SymExpr;
 use crate::state::{ConcolicState, Error};
 
@@ -9,7 +10,7 @@ pub trait StringStateOps {
     fn symbolic_strncmp(&mut self, addr1: &SymExpr, addr2: &SymExpr, n: &SymExpr) -> Result<SymExpr, Error>;
 }
 
-impl<O: Order> StringStateOps for ConcolicState<O> {
+impl<'ctx, O: Order, VS: ValueSolver<'ctx>> StringStateOps for ConcolicState<'ctx, O, VS> {
     fn symbolic_strnlen(&mut self, addr: &SymExpr, n: &SymExpr) -> Result<SymExpr, Error> {
         let last = self.search_memory_symbolic(
             addr,
