@@ -571,9 +571,9 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
             .read_operand_value(rhs)?
             .map_left(|bv| {
                 if signed {
-                    bv.signed_cast(lsize * 8)
+                    bv.signed().cast(lbits)
                 } else {
-                    bv
+                    bv.unsigned().cast(lbits)
                 }
             })
             .map_right(|expr| {
