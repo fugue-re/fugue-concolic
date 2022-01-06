@@ -522,7 +522,12 @@ impl SymExpr {
         if r.is_zero() || l.is_zero() {
             l
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
-            Self::val(lv << rv)
+            // NOTE: in future this check will be removed and we will panic instead
+            if rv.bits() != lv.bits() {
+                Self::val(lv << &rv.unsigned_cast(lv.bits()))
+            } else {
+                Self::val(lv << rv)
+            }
         } else {
             Self::lift_binop(BinOp::SHL, l, r)
         }
@@ -532,7 +537,11 @@ impl SymExpr {
         if r.is_zero() || l.is_zero() {
             l
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
-            Self::val(lv >> rv)
+            if rv.bits() != lv.bits() {
+                Self::val(lv >> &rv.unsigned_cast(lv.bits()))
+            } else {
+                Self::val(lv >> rv)
+            }
         } else {
             Self::lift_binop(BinOp::SHR, l, r)
         }
@@ -542,7 +551,11 @@ impl SymExpr {
         if r.is_zero() || self.is_zero() {
            self
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*self, &*r) {
-            Self::val(lv.signed_shr(rv))
+            if rv.bits() != lv.bits() {
+                Self::val(lv.signed_shr(&rv.signed_cast(lv.bits())))
+            } else {
+                Self::val(lv.signed_shr(rv))
+            }
         } else {
             Self::lift_binop(BinOp::SAR, self, r)
         }
