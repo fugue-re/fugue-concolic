@@ -26,7 +26,7 @@ consign! {
 static IVAR_FACTORY: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct IVar(u64, u32);
+pub struct IVar(u64, u32, String);
 
 impl fmt::Display for IVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -36,15 +36,24 @@ impl fmt::Display for IVar {
 
 impl IVar {
     pub fn new(bits: u32) -> Self {
-        Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits)
+        Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits, "".to_string())
     }
+
+    pub fn new_named(name: &str, bits: u32) -> Self {
+        Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits, name.to_string())
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+
 
     pub fn bits(&self) -> u32 {
         self.1
     }
 
-    pub fn id(&self) -> u64 {
-        self.0
+    pub fn name(&self) -> String {
+        self.2.clone()
     }
 }
 
@@ -312,8 +321,15 @@ impls_from_for! { i8, i16, i32, i64, i128, isize; true }
 impls_from_for! { u8, u16, u32, u64, u128, usize; false }
 
 impl SymExpr {
+    pub fn get_hconsign(self) -> HConsed<Expr> {
+        let hcons = self.0.clone();
+        hcons
+    }
     pub fn val<T: Into<Expr>>(t: T) -> SymExpr {
         EXPR.mk(t.into()).into()
+    }
+    pub fn val_sized(val: u64, bits: usize) -> SymExpr {
+        EXPR.mk(Expr::Val(BitVec::from_u64(val, bits))).into()
     }
 
     pub fn var(var: Var) -> SymExpr {
@@ -383,6 +399,7 @@ impl SymExpr {
 
 
     pub fn lift_binop(op: BinOp, l: SymExpr, r: SymExpr) -> SymExpr {
+        log::trace!("lift_binop: {:?} {:?} {:?}", op, l, r);
         assert_eq!(l.bits(), r.bits());
 
         EXPR.mk(Expr::BinOp(op, l, r)).into()
@@ -522,6 +539,7 @@ impl SymExpr {
         if r.is_zero() || l.is_zero() {
             l
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
+            log::trace!("symexpr shl({:?}, {:?}) result: {:?}", l, r, Self::val(lv.clone() << rv.clone()));
             // NOTE: in future this check will be removed and we will panic instead
             if rv.bits() != lv.bits() {
                 Self::val(lv << &rv.unsigned_cast(lv.bits()))
@@ -900,7 +918,8 @@ impl SymExpr {
             Expr::Val(ref v) => v.bits() as u32,
             Expr::Var(ref v) => v.bits() as u32,
             Expr::IVar(ref v) => v.bits(),
-            Expr::UnOp(_, ref v) | Expr::BinOp(_, ref v, _) => v.bits(),
+            Expr::UnOp(_, ref v) => v.bits(),
+            Expr::BinOp(_, ref v, _) => v.bits(),
             Expr::UnRel(_, _) | Expr::BinRel(_, _, _) => 8, // bool
             Expr::Cast(_, Cast::Bool) => 8, // bool
             Expr::Cast(_, c) => c.bits() as u32,
@@ -1291,6 +1310,7 @@ pub trait VisitRef<'expr> {
         }
     }
 
+    // recursive build the ast
     fn visit_expr_ref(&mut self, expr: &'expr SymExpr) {
         match **expr {
             Expr::Val(ref v) => self.visit_val_ref(v),

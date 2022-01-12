@@ -626,6 +626,8 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
             Either::Right(expr) => {
                 let formats = self.translator.float_formats();
                 Either::Right(ops(SymExpr::cast_float(expr, Arc::new(format)), formats)?)
+                // let formats = self.state.solver.translator().float_formats().clone();
+                // Either::Right(ops(SymExpr::cast_float(expr, Arc::new(format)), &formats)?)
             }
         };
 
@@ -684,6 +686,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
             .map_right(|expr| SymExpr::cast_float(expr, format.clone()));
 
         let formats = self.translator.float_formats();
+        // let formats = self.state.solver.translator().float_formats().clone();
         let value = match (lhs_val, rhs_val) {
             (Either::Left(bv1), Either::Left(bv2)) => Either::Left(opc(
                 format.from_bitvec(&bv1),
@@ -691,12 +694,12 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
                 &format,
             )?),
             (Either::Left(bv), Either::Right(se)) => {
-                Either::Right(ops(SymExpr::cast_float(bv.into(), format.clone()), se, formats)?)
+                Either::Right(ops(SymExpr::cast_float(bv.into(), format.clone()), se, &formats)?)
             }
             (Either::Right(se), Either::Left(bv)) => {
-                Either::Right(ops(se, SymExpr::cast_float(bv.into(), format.clone()), formats)?)
+                Either::Right(ops(se, SymExpr::cast_float(bv.into(), format.clone()), &formats)?)
             }
-            (Either::Right(se1), Either::Right(se2)) => Either::Right(ops(se1, se2, formats)?),
+            (Either::Right(se1), Either::Right(se2)) => Either::Right(ops(se1, se2, &formats)?),
         };
 
         value.expand_as(self, dest, true)?;
