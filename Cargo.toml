@@ -1,0 +1,24 @@
+[package]
+name = "fugue-concolic"
+version = "0.2.2"
+edition = "2021"
+
+[features]
+loader-all = ["fuguex/loader-all"]
+loader-ghidra = ["fuguex/loader-ghidra"]
+loader-idapro = ["fuguex/loader-idapro"]
+loader-radare = ["fuguex/loader-radare"]
+
+[dependencies]
+dyn-clone = "1"
+either = "1"
+fnv = "1"
+fugue = { version = "0.2", registry = "fugue" }
+fuguex = { version = "0.2", registry = "fugue" }
+fxhash = "0.2"
+hashconsing = "1"
+intervals = { version = "0.1", registry = "fugue" }
+itertools = "0.10"
+parking_lot = "0.11"
+smallvec = "1"
+thiserror = "1"
