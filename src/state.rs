@@ -304,7 +304,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
             .merge_join_by(s2.into_iter(), |(i, _), (j, _)| i.cmp(&j))
             .map(|kv| match kv {
                 Left((p, c)) => {
-                    let poff = p as usize * PAGE_SIZE;
+                    let poff = p * (PAGE_SIZE as u64);
 
                     let c1page = &c1.view_values_from(poff).unwrap();
                     let c2page = &c2.view_values_from(poff).unwrap();
@@ -312,7 +312,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
                     (p, c.merge_side(c1page, c2page, &lcons))
                 }
                 Right((p, c)) => {
-                    let poff = p as usize * PAGE_SIZE;
+                    let poff = p * (PAGE_SIZE as u64);
 
                     let c1page = &c1.view_values_from(poff).unwrap();
                     let c2page = &c2.view_values_from(poff).unwrap();
@@ -320,7 +320,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
                     (p, c.merge_side(c2page, c1page, &rcons))
                 }
                 Both((p, lc), (_, rc)) => {
-                    let poff = p as usize * PAGE_SIZE;
+                    let poff = p * (PAGE_SIZE as u64);
 
                     let c1page = &c1.view_values_from(poff).unwrap();
                     let c2page = &c2.view_values_from(poff).unwrap();
@@ -332,7 +332,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
             .filter_map(|kv| match kv {
                 Left((p, c)) | Both((p, c), _) => Some((p, c)),
                 Right(p) => {
-                    let poff = p as usize * PAGE_SIZE;
+                    let poff = p * (PAGE_SIZE as u64);
 
                     let c1page = &c1.view_values_from(poff).unwrap();
                     let c2page = &c2.view_values_from(poff).unwrap();
