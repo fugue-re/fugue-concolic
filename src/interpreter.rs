@@ -9,6 +9,7 @@ use fugue::fp::{self, float_format_from_size, Float, FloatFormat, FloatFormatOps
 use fugue::ir::{Address, AddressSpace, AddressSpaceId, AddressValue, IntoAddress, Translator};
 use fugue::ir::disassembly::ContextDatabase;
 use fugue::ir::il::pcode::Operand;
+use fugue::ir::disassembly::lift::FloatFormats;
 
 use fnv::FnvHashMap as HashMap;
 
@@ -605,7 +606,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
     ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(Float, &FloatFormat) -> Result<COCO, Error>,
-        COS: FnOnce(SymExpr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr, &FloatFormats) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -644,7 +645,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
     ) -> Result<Outcome<Outcomes<'ctx, O, VS>>, Error>
     where
         COC: FnOnce(Float, Float, &FloatFormat) -> Result<COCO, Error>,
-        COS: FnOnce(SymExpr, SymExpr, &HashMap<usize, Arc<FloatFormat>>) -> Result<COSO, Error>,
+        COS: FnOnce(SymExpr, SymExpr, &FloatFormats) -> Result<COSO, Error>,
         COCO: ToSignedBytes,
         COSO: ToSignedBytes,
     {
@@ -1912,7 +1913,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
             let view = self
                 .state
                 .concrete
-                .view_values_from(&address)
+                .view_values_from(address.clone())
                 .map_err(StateError::State)?;
 
             let pstep_state = //StepState::from(
