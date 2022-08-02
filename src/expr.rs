@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use hashconsing::{consign, HConsed, HashConsign};
 
-use fnv::FnvHashMap as HashMap;
+// use fnv::FnvHashMap as HashMap;
+use fugue::ir::disassembly::lift::FloatFormats;
 
 use fugue::bv::BitVec;
 use fugue::fp::FloatFormat;
@@ -26,7 +27,7 @@ consign! {
 static IVAR_FACTORY: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct IVar(u64, u32);
+pub struct IVar(u64, u32, String);
 
 impl fmt::Display for IVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -36,15 +37,24 @@ impl fmt::Display for IVar {
 
 impl IVar {
     pub fn new(bits: u32) -> Self {
-        Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits)
+        Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits, "".to_string())
     }
+
+    pub fn new_named(name: &str, bits: u32) -> Self {
+        Self(IVAR_FACTORY.fetch_add(1, SeqCst), bits, name.to_string())
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+
 
     pub fn bits(&self) -> u32 {
         self.1
     }
 
-    pub fn id(&self) -> u64 {
-        self.0
+    pub fn name(&self) -> String {
+        self.2.clone()
     }
 }
 
@@ -104,14 +114,14 @@ pub enum Expr {
     UnOp(UnOp, SymExpr),            // T -> T
     BinOp(BinOp, SymExpr, SymExpr), // T * T -> T
 
-    Cast(SymExpr, Cast),                  // T -> Cast::T
+    Cast(SymExpr, Cast), // T -> Cast::T
     Load(SymExpr, usize, AddressSpaceId), // SPACE[T]:SIZE -> T
 
     ExtractLow(SymExpr, u32),
     ExtractHigh(SymExpr, u32),
     Extract(SymExpr, u32, u32), // T T[LSB..MSB) -> T
 
-    Concat(SymExpr, SymExpr), // T * T -> T
+    Concat(SymExpr, SymExpr),   // T * T -> T
 
     IfElse(SymExpr, SymExpr, SymExpr),
 
@@ -130,28 +140,15 @@ impl Expr {
             Expr::Var(v) => write!(f, "{}", v),
             Expr::IVar(v) => write!(f, "{}", v),
 
-            Expr::Cast(expr, Cast::Bool) => {
-                expr.fmt_l1(f)?;
-                write!(f, " as bool")
-            }
-            Expr::Cast(expr, Cast::Signed(bits)) => {
-                expr.fmt_l1(f)?;
-                write!(f, " as i{}", bits)
-            }
-            Expr::Cast(expr, Cast::Unsigned(bits)) => {
-                expr.fmt_l1(f)?;
-                write!(f, " as u{}", bits)
-            }
-            Expr::Cast(expr, Cast::Float(format)) => {
-                expr.fmt_l1(f)?;
-                write!(f, " as f{}", format.bits())
-            }
+
+            Expr::Cast(expr, Cast::Bool) => { expr.fmt_l1(f)?; write!(f, " as bool") },
+            Expr::Cast(expr, Cast::Signed(bits)) => { expr.fmt_l1(f)?;  write!(f, " as i{}", bits) },
+            Expr::Cast(expr, Cast::Unsigned(bits)) => { expr.fmt_l1(f)?; write!(f, " as u{}", bits) },
+            Expr::Cast(expr, Cast::Float(format)) => { expr.fmt_l1(f)?; write!(f, " as f{}", format.bits()) },
 
             Expr::ExtractLow(expr, bits) => write!(f, "extract-low({}, bits={})", expr, bits),
             Expr::ExtractHigh(expr, bits) => write!(f, "extract-high({}, bits={})", expr, bits),
-            Expr::Extract(expr, lsb, msb) => {
-                write!(f, "extract({}, from={}, to={})", expr, lsb, msb)
-            }
+            Expr::Extract(expr, lsb, msb) => write!(f, "extract({}, from={}, to={})", expr, lsb, msb),
             Expr::UnOp(UnOp::ABS, expr) => write!(f, "abs({})", expr),
             Expr::UnOp(UnOp::SQRT, expr) => write!(f, "sqrt({})", expr),
             Expr::UnOp(UnOp::ROUND, expr) => write!(f, "round({})", expr),
@@ -171,125 +168,55 @@ impl Expr {
 
     fn fmt_l2(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::UnOp(UnOp::NEG, expr) => {
-                write!(f, "-")?;
-                expr.fmt_l1(f)
-            }
-            Expr::UnOp(UnOp::NOT, expr) => {
-                write!(f, "!")?;
-                expr.fmt_l1(f)
-            }
-            expr => expr.fmt_l1(f),
+            Expr::UnOp(UnOp::NEG, expr) => { write!(f, "-")?; expr.fmt_l1(f) },
+            Expr::UnOp(UnOp::NOT, expr) => { write!(f, "!")?; expr.fmt_l1(f) },
+            expr => expr.fmt_l1(f)
         }
     }
 
     fn fmt_l3(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::BinOp(BinOp::MUL, e1, e2) => {
-                e1.fmt_l3(f)?;
-                write!(f, " * ")?;
-                e2.fmt_l2(f)
-            }
-            Expr::BinOp(BinOp::DIV, e1, e2) => {
-                e1.fmt_l3(f)?;
-                write!(f, " / ")?;
-                e2.fmt_l2(f)
-            }
-            Expr::BinOp(BinOp::SDIV, e1, e2) => {
-                e1.fmt_l3(f)?;
-                write!(f, " s/ ")?;
-                e2.fmt_l2(f)
-            }
-            Expr::BinOp(BinOp::REM, e1, e2) => {
-                e1.fmt_l3(f)?;
-                write!(f, " % ")?;
-                e2.fmt_l2(f)
-            }
-            Expr::BinOp(BinOp::SREM, e1, e2) => {
-                e1.fmt_l3(f)?;
-                write!(f, " s% ")?;
-                e2.fmt_l2(f)
-            }
-            expr => expr.fmt_l2(f),
+            Expr::BinOp(BinOp::MUL, e1, e2) => { e1.fmt_l3(f)?; write!(f, " * ")?; e2.fmt_l2(f) }
+            Expr::BinOp(BinOp::DIV, e1, e2) => { e1.fmt_l3(f)?; write!(f, " / ")?; e2.fmt_l2(f) }
+            Expr::BinOp(BinOp::SDIV, e1, e2) => { e1.fmt_l3(f)?; write!(f, " s/ ")?; e2.fmt_l2(f) }
+            Expr::BinOp(BinOp::REM, e1, e2) => { e1.fmt_l3(f)?; write!(f, " % ")?; e2.fmt_l2(f) }
+            Expr::BinOp(BinOp::SREM, e1, e2) => { e1.fmt_l3(f)?; write!(f, " s% ")?; e2.fmt_l2(f) }
+            expr => expr.fmt_l2(f)
         }
     }
 
     fn fmt_l4(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::BinOp(BinOp::ADD, e1, e2) => {
-                e1.fmt_l4(f)?;
-                write!(f, " + ")?;
-                e2.fmt_l3(f)
-            }
-            Expr::BinOp(BinOp::SUB, e1, e2) => {
-                e1.fmt_l4(f)?;
-                write!(f, " - ")?;
-                e2.fmt_l3(f)
-            }
-            expr => expr.fmt_l3(f),
+            Expr::BinOp(BinOp::ADD, e1, e2) => { e1.fmt_l4(f)?; write!(f, " + ")?; e2.fmt_l3(f) },
+            Expr::BinOp(BinOp::SUB, e1, e2) => { e1.fmt_l4(f)?; write!(f, " - ")?; e2.fmt_l3(f) },
+            expr => expr.fmt_l3(f)
         }
     }
 
     fn fmt_l5(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::BinOp(BinOp::SHL, e1, e2) => {
-                e1.fmt_l5(f)?;
-                write!(f, " << ")?;
-                e2.fmt_l4(f)
-            }
-            Expr::BinOp(BinOp::SHR, e1, e2) => {
-                e1.fmt_l5(f)?;
-                write!(f, " >> ")?;
-                e2.fmt_l4(f)
-            }
-            Expr::BinOp(BinOp::SAR, e1, e2) => {
-                e1.fmt_l5(f)?;
-                write!(f, " s>> ")?;
-                e2.fmt_l4(f)
-            }
-            expr => expr.fmt_l4(f),
+            Expr::BinOp(BinOp::SHL, e1, e2) => { e1.fmt_l5(f)?; write!(f, " << ")?; e2.fmt_l4(f) },
+            Expr::BinOp(BinOp::SHR, e1, e2) => { e1.fmt_l5(f)?; write!(f, " >> ")?; e2.fmt_l4(f) },
+            Expr::BinOp(BinOp::SAR, e1, e2) => { e1.fmt_l5(f)?; write!(f, " s>> ")?; e2.fmt_l4(f) },
+            expr => expr.fmt_l4(f)
         }
     }
 
     fn fmt_l6(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::BinRel(BinRel::LT, e1, e2) => {
-                e1.fmt_l6(f)?;
-                write!(f, " < ")?;
-                e2.fmt_l5(f)
-            }
-            Expr::BinRel(BinRel::LE, e1, e2) => {
-                e1.fmt_l6(f)?;
-                write!(f, " <= ")?;
-                e2.fmt_l5(f)
-            }
-            Expr::BinRel(BinRel::SLT, e1, e2) => {
-                e1.fmt_l6(f)?;
-                write!(f, " s< ")?;
-                e2.fmt_l5(f)
-            }
-            Expr::BinRel(BinRel::SLE, e1, e2) => {
-                e1.fmt_l6(f)?;
-                write!(f, " s<= ")?;
-                e2.fmt_l5(f)
-            }
-            expr => expr.fmt_l5(f),
+            Expr::BinRel(BinRel::LT, e1, e2) => { e1.fmt_l6(f)?; write!(f, " < ")?; e2.fmt_l5(f) },
+            Expr::BinRel(BinRel::LE, e1, e2) => { e1.fmt_l6(f)?; write!(f, " <= ")?; e2.fmt_l5(f) },
+            Expr::BinRel(BinRel::SLT, e1, e2) => { e1.fmt_l6(f)?; write!(f, " s< ")?; e2.fmt_l5(f) },
+            Expr::BinRel(BinRel::SLE, e1, e2) => { e1.fmt_l6(f)?; write!(f, " s<= ")?; e2.fmt_l5(f) },
+            expr => expr.fmt_l5(f)
         }
     }
 
     fn fmt_l7(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::BinRel(BinRel::EQ, e1, e2) => {
-                e1.fmt_l7(f)?;
-                write!(f, " == ")?;
-                e2.fmt_l6(f)
-            }
-            Expr::BinRel(BinRel::NEQ, e1, e2) => {
-                e1.fmt_l7(f)?;
-                write!(f, " != ")?;
-                e2.fmt_l6(f)
-            }
-            expr => expr.fmt_l6(f),
+            Expr::BinRel(BinRel::EQ, e1, e2) => { e1.fmt_l7(f)?; write!(f, " == ")?; e2.fmt_l6(f) },
+            Expr::BinRel(BinRel::NEQ, e1, e2) => { e1.fmt_l7(f)?; write!(f, " != ")?; e2.fmt_l6(f) },
+            expr => expr.fmt_l6(f)
         }
     }
 
@@ -395,8 +322,15 @@ impls_from_for! { i8, i16, i32, i64, i128, isize; true }
 impls_from_for! { u8, u16, u32, u64, u128, usize; false }
 
 impl SymExpr {
+    pub fn get_hconsign(self) -> HConsed<Expr> {
+        let hcons = self.0.clone();
+        hcons
+    }
     pub fn val<T: Into<Expr>>(t: T) -> SymExpr {
         EXPR.mk(t.into()).into()
+    }
+    pub fn val_sized(val: u64, bits: usize) -> SymExpr {
+        EXPR.mk(Expr::Val(BitVec::from_u64(val, bits))).into()
     }
 
     pub fn var(var: Var) -> SymExpr {
@@ -411,27 +345,27 @@ impl SymExpr {
         EXPR.mk(Expr::UnOp(op, v)).into()
     }
 
-    pub fn neg(self) -> SymExpr {
-        if let Expr::Val(ref v) = &*self {
+    pub fn neg(v: SymExpr) -> SymExpr {
+        if let Expr::Val(ref v) = &*v {
             Self::val(-v)
-        } else if let Expr::UnOp(UnOp::NEG, vv) = &*self {
+        } else if let Expr::UnOp(UnOp::NEG, vv) = &*v {
             vv.clone()
         } else {
-            Self::lift_unop(UnOp::NEG, self)
+            Self::lift_unop(UnOp::NEG, v)
         }
     }
 
-    pub fn bool_not(self) -> SymExpr {
-        self.cast_bool().not()
+    pub fn bool_not(v: SymExpr) -> SymExpr {
+        v.cast_bool().not()
     }
 
-    pub fn not(self) -> SymExpr {
-        if let Expr::Val(ref v) = &*self {
+    pub fn not(v: SymExpr) -> SymExpr {
+        if let Expr::Val(ref v) = &*v {
             Self::val(!v)
-        } else if let Expr::UnOp(UnOp::NOT, vv) = &*self {
+        } else if let Expr::UnOp(UnOp::NOT, vv) = &*v {
             vv.clone()
         } else {
-            Self::lift_unop(UnOp::NOT, self)
+            Self::lift_unop(UnOp::NOT, v)
         }
     }
 
@@ -455,7 +389,7 @@ impl SymExpr {
         Self::lift_unop(UnOp::FLOOR, self)
     }
 
-    #[deprecated(since = "0.0", note = "use `SymExpr::count_ones`")]
+    #[deprecated(since = "0.0", note="use `SymExpr::count_ones`")]
     pub fn popcount(self) -> SymExpr {
         Self::lift_unop(UnOp::POPCOUNT, self)
     }
@@ -464,29 +398,27 @@ impl SymExpr {
         Self::lift_unop(UnOp::POPCOUNT, self)
     }
 
+
     pub fn lift_binop(op: BinOp, l: SymExpr, r: SymExpr) -> SymExpr {
+        // log::trace!("lift_binop: {:?} {:?} {:?}", op, l, r);
         assert_eq!(l.bits(), r.bits());
 
         EXPR.mk(Expr::BinOp(op, l, r)).into()
     }
 
-    pub fn bool_and(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn bool_and(l: SymExpr, r: SymExpr) -> SymExpr {
         Self::and(l.cast_bool(), r.cast_bool())
     }
 
-    pub fn bool_or(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn bool_or(l: SymExpr, r: SymExpr) -> SymExpr {
         Self::or(l.cast_bool(), r.cast_bool())
     }
 
-    pub fn bool_xor(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn bool_xor(l: SymExpr, r: SymExpr) -> SymExpr {
         Self::xor(l.cast_bool(), r.cast_bool())
     }
 
-    pub fn and(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn and(l: SymExpr, r: SymExpr) -> SymExpr {
         if l.is_zero() || r.is_ones() {
             l
         } else if r.is_zero() || l.is_ones() {
@@ -498,8 +430,7 @@ impl SymExpr {
         }
     }
 
-    pub fn or(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn or(l: SymExpr, r: SymExpr) -> SymExpr {
         if l.is_zero() || r.is_ones() {
             r
         } else if r.is_zero() || l.is_ones() {
@@ -511,8 +442,9 @@ impl SymExpr {
         }
     }
 
-    pub fn xor(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn xor(l: SymExpr, r: SymExpr) -> SymExpr {
+        assert_eq!(l.bits(), r.bits());
+
         if l == r {
             Self::val(BitVec::zero(l.bits() as usize))
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
@@ -530,8 +462,7 @@ impl SymExpr {
         }
     }
 
-    pub fn add(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn add(l: SymExpr, r: SymExpr) -> SymExpr {
         if l.is_zero() {
             r
         } else if r.is_zero() {
@@ -543,8 +474,7 @@ impl SymExpr {
         }
     }
 
-    pub fn mul(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn mul(l: SymExpr, r: SymExpr) -> SymExpr {
         if l.is_zero() || r.is_zero() {
             Self::val(BitVec::zero(l.bits() as usize))
         } else if r.is_one() {
@@ -558,8 +488,7 @@ impl SymExpr {
         }
     }
 
-    pub fn sub(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn sub(l: SymExpr, r: SymExpr) -> SymExpr {
         if l.is_zero() {
             Self::neg(r)
         } else if r.is_zero() {
@@ -571,8 +500,7 @@ impl SymExpr {
         }
     }
 
-    pub fn div(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn div(l: SymExpr, r: SymExpr) -> SymExpr {
         if l.is_zero() || r.is_one() {
             l
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
@@ -592,8 +520,7 @@ impl SymExpr {
         }
     }
 
-    pub fn rem(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn rem(l: SymExpr, r: SymExpr) -> SymExpr {
         if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
             Self::val(lv % rv)
         } else {
@@ -609,11 +536,11 @@ impl SymExpr {
         }
     }
 
-    pub fn shl(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn shl(l: SymExpr, r: SymExpr) -> SymExpr {
         if r.is_zero() || l.is_zero() {
             l
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
+            // log::trace!("symexpr shl({:?}, {:?}) result: {:?}", l, r, Self::val(lv.clone() << rv.clone()));
             // NOTE: in future this check will be removed and we will panic instead
             if rv.bits() != lv.bits() {
                 Self::val(lv << &rv.unsigned_cast(lv.bits()))
@@ -625,8 +552,7 @@ impl SymExpr {
         }
     }
 
-    pub fn shr(self, r: SymExpr) -> SymExpr {
-        let l = self;
+    pub fn shr(l: SymExpr, r: SymExpr) -> SymExpr {
         if r.is_zero() || l.is_zero() {
             l
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*l, &*r) {
@@ -642,7 +568,7 @@ impl SymExpr {
 
     pub fn signed_shr(self, r: SymExpr) -> SymExpr {
         if r.is_zero() || self.is_zero() {
-            self
+           self
         } else if let (Expr::Val(ref lv), Expr::Val(ref rv)) = (&*self, &*r) {
             if rv.bits() != lv.bits() {
                 Self::val(lv.signed_shr(&rv.signed_cast(lv.bits())))
@@ -772,8 +698,8 @@ impl SymExpr {
         }
     }
 
-    pub fn cast(self, c: Cast) -> SymExpr {
-        EXPR.mk(Expr::Cast(self, c)).into()
+    pub fn cast(e: SymExpr, c: Cast) -> SymExpr {
+        EXPR.mk(Expr::Cast(e, c)).into()
     }
 
     pub fn lift_unrel(op: UnRel, e: SymExpr) -> SymExpr {
@@ -834,79 +760,87 @@ impl SymExpr {
         self.cast_bool().ne(r.cast_bool())
     }
 
-    pub fn float_nan(self, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_nan(self, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
         self.cast_float(fmt.clone()).is_nan()
     }
 
-    pub fn float_neg(self, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_neg(self, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
         self.cast_float(fmt.clone()).neg()
     }
 
-    pub fn float_abs(self, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_abs(self, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
         self.cast_float(fmt.clone()).abs()
     }
 
-    pub fn float_sqrt(self, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_sqrt(self, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
         self.cast_float(fmt.clone()).sqrt()
     }
 
-    pub fn float_ceiling(self, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_ceiling(self, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
         self.cast_float(fmt.clone()).ceiling()
     }
 
-    pub fn float_floor(self, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_floor(self, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
         self.cast_float(fmt.clone()).floor()
     }
 
-    pub fn float_round(self, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_round(self, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
         self.cast_float(fmt.clone()).round()
     }
 
-    pub fn float_eq(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_eq(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).eq(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .eq(r.cast_float(fmt))
     }
 
-    pub fn float_ne(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_ne(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).ne(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .ne(r.cast_float(fmt))
     }
 
-    pub fn float_lt(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_lt(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).lt(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .lt(r.cast_float(fmt))
     }
 
-    pub fn float_le(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_le(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).le(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .le(r.cast_float(fmt))
     }
 
-    pub fn float_add(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_add(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).add(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .add(r.cast_float(fmt))
     }
 
-    pub fn float_div(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_div(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).div(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .div(r.cast_float(fmt))
     }
 
-    pub fn float_mul(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_mul(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).mul(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .mul(r.cast_float(fmt))
     }
 
-    pub fn float_sub(self, r: SymExpr, fmts: &HashMap<usize, Arc<FloatFormat>>) -> SymExpr {
+    pub fn float_sub(self, r: SymExpr, fmts: &FloatFormats) -> SymExpr {
         let fmt = fmts[&(self.bits() as usize)].clone();
-        self.cast_float(fmt.clone()).sub(r.cast_float(fmt))
+        self.cast_float(fmt.clone())
+            .sub(r.cast_float(fmt))
     }
 
     pub fn eq(self, r: SymExpr) -> SymExpr {
@@ -976,16 +910,8 @@ impl SymExpr {
         Self(EXPR.mk(Expr::Load(expr, bits, space)))
     }
 
-    pub fn intrinsic<S: AsRef<str>, I: IntoIterator<Item = SymExpr>>(
-        name: S,
-        args: I,
-        bits: usize,
-    ) -> SymExpr {
-        Self(EXPR.mk(Expr::Intrinsic(
-            Arc::from(name.as_ref()),
-            args.into_iter().collect(),
-            bits,
-        )))
+    pub fn intrinsic<S: AsRef<str>, I: IntoIterator<Item=SymExpr>>(name: S, args: I, bits: usize) -> SymExpr {
+        Self(EXPR.mk(Expr::Intrinsic(Arc::from(name.as_ref()), args.into_iter().collect(), bits)))
     }
 
     pub fn bits(&self) -> u32 {
@@ -993,14 +919,16 @@ impl SymExpr {
             Expr::Val(ref v) => v.bits() as u32,
             Expr::Var(ref v) => v.bits() as u32,
             Expr::IVar(ref v) => v.bits(),
-            Expr::UnOp(_, ref v) | Expr::BinOp(_, ref v, _) => v.bits(),
+            Expr::UnOp(_, ref v) => v.bits(),
+            Expr::BinOp(_, ref v, _) => v.bits(),
             Expr::UnRel(_, _) | Expr::BinRel(_, _, _) => 8, // bool
-            Expr::Cast(_, Cast::Bool) => 8,                 // bool
+            Expr::Cast(_, Cast::Bool) => 8, // bool
             Expr::Cast(_, c) => c.bits() as u32,
             Expr::IfElse(_, ref l, _) => l.bits(),
             Expr::Intrinsic(_, _, bits) => *bits as u32,
             Expr::Concat(ref l, ref r) => l.bits() + r.bits(),
-            Expr::ExtractLow(_, bits) | Expr::ExtractHigh(_, bits) => *bits,
+            Expr::ExtractLow(_, bits) |
+            Expr::ExtractHigh(_, bits) => *bits,
             Expr::Extract(_, lsb, msb) => msb - lsb,
             Expr::Load(_, bits, _) => *bits as u32,
         }
@@ -1028,21 +956,16 @@ impl SymExpr {
         match &**self {
             Expr::Cast(_, Cast::Bool) | Expr::UnRel(_, _) | Expr::BinRel(_, _, _) => true,
             Expr::UnOp(UnOp::NOT, ref v) => v.is_bool(),
-            Expr::BinOp(BinOp::AND | BinOp::OR | BinOp::XOR, ref v1, ref v2) => {
-                v1.is_bool() || v2.is_bool()
-            }
+            Expr::BinOp(BinOp::AND | BinOp::OR | BinOp::XOR, ref v1, ref v2) => v1.is_bool() || v2.is_bool(),
             _ => false,
         }
     }
 
     pub fn is_float(&self) -> bool {
         match &**self {
-            Expr::UnOp(UnOp::ABS | UnOp::SQRT | UnOp::CEILING | UnOp::FLOOR | UnOp::ROUND, _)
-            | Expr::Cast(_, Cast::Float(_)) => true,
+            Expr::UnOp(UnOp::ABS | UnOp::SQRT | UnOp::CEILING | UnOp::FLOOR | UnOp::ROUND, _) | Expr::Cast(_, Cast::Float(_)) => true,
             Expr::UnOp(UnOp::NEG, ref v) => v.is_float(),
-            Expr::BinOp(BinOp::ADD | BinOp::SUB | BinOp::MUL | BinOp::DIV, ref v1, ref v2) => {
-                v1.is_float() || v2.is_float()
-            }
+            Expr::BinOp(BinOp::ADD | BinOp::SUB | BinOp::MUL | BinOp::DIV, ref v1, ref v2) => v1.is_float() || v2.is_float(),
             _ => false,
         }
     }
@@ -1076,37 +999,27 @@ impl SymExpr {
     }
 
     pub fn ast<'ctx, S>(&self, solver: &mut S) -> S::Value
-    where
-        S: ValueSolver<'ctx>,
-    {
+    where S: ValueSolver<'ctx> {
         solver.ast(self)
     }
 
     pub fn solve<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Option<BitVec>
-    where
-        S: ValueSolver<'ctx>,
-    {
+    where S: ValueSolver<'ctx> {
         solver.solve(self, constraints)
     }
 
     pub fn solve_many<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Vec<BitVec>
-    where
-        S: ValueSolver<'ctx>,
-    {
+    where S: ValueSolver<'ctx> {
         solver.solve_many(self, constraints)
     }
 
     pub fn minimise<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Option<BitVec>
-    where
-        S: ValueSolver<'ctx>,
-    {
+    where S: ValueSolver<'ctx> {
         solver.minimise(self, constraints)
     }
 
     pub fn maximise<'ctx, S>(&self, solver: &mut S, constraints: &[SymExpr]) -> Option<BitVec>
-    where
-        S: ValueSolver<'ctx>,
-    {
+    where S: ValueSolver<'ctx> {
         solver.maximise(self, constraints)
     }
 }
@@ -1327,6 +1240,7 @@ impl Sub for SymExpr {
     }
 }
 
+
 pub trait VisitRef<'expr> {
     fn visit_val_ref(&mut self, bv: &'expr BitVec);
     fn visit_var_ref(&mut self, var: &'expr Var);
@@ -1379,12 +1293,7 @@ pub trait VisitRef<'expr> {
         self.visit_expr_ref(rexpr);
     }
 
-    fn visit_ite_ref(
-        &mut self,
-        cond: &'expr SymExpr,
-        lexpr: &'expr SymExpr,
-        rexpr: &'expr SymExpr,
-    ) {
+    fn visit_ite_ref(&mut self, cond: &'expr SymExpr, lexpr: &'expr SymExpr, rexpr: &'expr SymExpr) {
         self.visit_expr_ref(cond);
         self.visit_expr_ref(lexpr);
         self.visit_expr_ref(rexpr);
@@ -1402,6 +1311,7 @@ pub trait VisitRef<'expr> {
         }
     }
 
+    // recursive build the ast
     fn visit_expr_ref(&mut self, expr: &'expr SymExpr) {
         match **expr {
             Expr::Val(ref v) => self.visit_val_ref(v),
@@ -1477,14 +1387,8 @@ pub trait VisitMap<'expr> {
         self.visit_expr(lexpr).concat(self.visit_expr(rexpr))
     }
 
-    fn visit_ite(
-        &mut self,
-        cond: &'expr SymExpr,
-        lexpr: &'expr SymExpr,
-        rexpr: &'expr SymExpr,
-    ) -> SymExpr {
-        self.visit_expr(cond)
-            .ite(self.visit_expr(lexpr), self.visit_expr(rexpr))
+    fn visit_ite(&mut self, cond: &'expr SymExpr, lexpr: &'expr SymExpr, rexpr: &'expr SymExpr) -> SymExpr {
+        self.visit_expr(cond).ite(self.visit_expr(lexpr), self.visit_expr(rexpr))
     }
 
     fn visit_load(&mut self, expr: &'expr SymExpr, bits: usize, space: AddressSpaceId) -> SymExpr {
