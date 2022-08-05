@@ -1,6 +1,6 @@
 [package]
 name = "fugue-concolic"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 
 [features]
@@ -13,7 +13,7 @@ loader-radare = ["fuguex/loader-radare"]
 dyn-clone = "1"
 either = "1"
 fnv = "1"
-fugue = { version = "0.2", registry = "fugue" }
+fugue = { version = "0.2", registry = "fugue", default-features = false }
 fuguex = { version = "0.2", registry = "fugue" }
 fxhash = "0.2"
 hashconsing = "1"
