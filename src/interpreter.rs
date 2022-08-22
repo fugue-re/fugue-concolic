@@ -1950,4 +1950,16 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>, P: SymbolicPointerStrategy<'ctx, O, 
     fn interpreter_space(&self) -> Arc<AddressSpace> {
         self.state.concrete.memory_space()
     }
+
+    fn interpreter_address_val(&self, address: Address) -> AddressValue {
+        // TODO: Check which one is better
+        
+        // AddressValue from translator
+        self.translator.address(address.into())
+
+        // AddressValue from memory space
+        // let space = self.state.memory_space();
+        // address.into_address_value(&space)
+        // AddressValue::new(space, offset)
+    }
 }
