@@ -538,7 +538,11 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         let aligned_end = (start + length as u64) / page_size;
 
         let offset_start = start % page_size;
-        let offset_end = (start + length as u64) % page_size;
+        let mut offset_end = (start + length as u64) % page_size;   
+        if offset_end == 0 && start + length as u64 != 0 {
+            // When it equals to 0 because offset_end is the PAGE_SIZE
+            offset_end = page_size;
+        }
 
         let range = (aligned_start..=aligned_end).step_by(PAGE_SIZE);
         let spos = 0;
@@ -573,7 +577,11 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         let aligned_end = (start + length as u64) / page_size;
 
         let offset_start = start % page_size;
-        let offset_end = (start + length as u64) % page_size;
+        let mut offset_end = (start + length as u64) % page_size;   
+        if offset_end == 0 && start + length as u64 != 0 {
+            // When it equals to 0 because offset_end is the PAGE_SIZE
+            offset_end = page_size;
+        }
 
         let range = (aligned_start..=aligned_end).step_by(PAGE_SIZE);
         let spos = 0;
@@ -699,7 +707,11 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         let aligned_end = (start + length as u64) / page_size;
 
         let offset_start = start % page_size;
-        let offset_end = (start + length as u64) % page_size;
+        let mut offset_end = (start + length as u64) % page_size;   
+        if offset_end == 0 && start + length as u64 != 0 {
+            // When it equals to 0 because offset_end is the PAGE_SIZE
+            offset_end = page_size;
+        }
 
         let range = (aligned_start..=aligned_end).step_by(PAGE_SIZE);
         let spos = 0;
@@ -751,7 +763,11 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         let aligned_end = (start + length as u64) / page_size;
 
         let offset_start = start % page_size;
-        let offset_end = (start + length as u64) % page_size;
+        let mut offset_end = (start + length as u64) % page_size;   
+        if offset_end == 0 && start + length as u64 != 0 {
+            // When it equals to 0 because offset_end is the PAGE_SIZE
+            offset_end = page_size;
+        }
 
         let range = (aligned_start..=aligned_end).step_by(PAGE_SIZE);
         let spos = 0;
@@ -904,7 +920,11 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         let aligned_end = (start + length as u64) / page_size;
 
         let offset_start = start % page_size;
-        let offset_end = (start + length as u64) % page_size;
+        let mut offset_end = (start + length as u64) % page_size;   
+        if offset_end == 0 && start + length as u64 != 0 {
+            // When it equals to 0 because offset_end is the PAGE_SIZE
+            offset_end = page_size;
+        }
 
         let range = (aligned_start..=aligned_end).step_by(PAGE_SIZE);
         let spos = 0;
@@ -961,12 +981,19 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         let aligned_start = start / page_size;
         let aligned_end = (start + length as u64) / page_size;
 
+        // The addr of the last byte of the PAGE should be used for length calculation
+        // E.g. length = 0xffff- 0x0000 = 0xffff
         let offset_start = start % page_size;
-        let offset_end = (start + length as u64) % page_size;
+        let mut offset_end = (start + length as u64) % page_size;   
+        if offset_end == 0 && start + length as u64 != 0 {
+            // When it equals to 0 because offset_end is the PAGE_SIZE
+            offset_end = page_size;
+        }       
 
         let range = (aligned_start..=aligned_end).step_by(PAGE_SIZE);
         let spos = 0;
-        let epos = (aligned_end - aligned_start) as usize / PAGE_SIZE;
+        let epos = (aligned_end - aligned_start) as usize / PAGE_SIZE;  // num of pages
+
 
         let mut exprs = Vec::new();
         let concrete = concs.view_values(start, length)?;
