@@ -4,11 +4,11 @@ use fugue::bv::BitVec;
 use fugue::ir::Address;
 use fugue::ir::il::pcode::{Operand, Register};
 
-use fuguex::state::State;
+use metaemu::state::State;
 
 use dyn_clone::{DynClone, clone_trait_object};
 
-use fuguex::hooks::types::{Error, HookAction, HookCallAction, HookOutcome};
+use metaemu::hooks::types::{Error, HookAction, HookCallAction, HookOutcome};
 
 use crate::expr::SymExpr;
 
@@ -116,6 +116,6 @@ pub trait HookConcolic {
 pub trait ClonableHookConcolic: DynClone + HookConcolic { }
 clone_trait_object!(
     <State, Error, Outcome> ClonableHookConcolic<State=State, Error=Error, Outcome=Outcome>
-    where State: fuguex::state::State,
+    where State: metaemu::state::State,
           Error: std::error::Error + Send + Sync + 'static,
 );

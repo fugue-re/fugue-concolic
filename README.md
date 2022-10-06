@@ -4,7 +4,7 @@
 
 # Fugue Binary Analysis Framework
 
-This crate provides a concolic interpreter for `fuguex-core`. Currently, we
+This crate provides a concolic interpreter for `metaemu-core`. Currently, we
 have support for two SMT solvers: [Boolector] and [Z3].
 
 [BAP]: https://github.com/BinaryAnalysisPlatform/bap/

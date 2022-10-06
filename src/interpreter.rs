@@ -13,12 +13,12 @@ use fugue::ir::disassembly::lift::FloatFormats;
 
 use fnv::FnvHashMap as HashMap;
 
-use fuguex::hooks::types::HookCallAction;
-use fuguex::intrinsics::{IntrinsicAction, IntrinsicHandler};
-use fuguex::machine::{Branch, Interpreter, Outcome, OrOutcome, StepState};
-use fuguex::state::State;
-use fuguex::state::pcode::PCodeState;
-use fuguex::state::register::ReturnLocation;
+use metaemu::hooks::types::HookCallAction;
+use metaemu::intrinsics::{IntrinsicAction, IntrinsicHandler};
+use metaemu::machine::{Branch, Interpreter, Outcome, OrOutcome, StepState};
+use metaemu::state::State;
+use metaemu::state::pcode::PCodeState;
+use metaemu::state::register::ReturnLocation;
 
 use parking_lot::RwLock;
 
@@ -35,9 +35,9 @@ pub enum Error {
     #[error("division by zero")]
     DivisionByZero,
     #[error(transparent)]
-    Hook(fuguex::hooks::types::Error<StateError>),
+    Hook(metaemu::hooks::types::Error<StateError>),
     #[error(transparent)]
-    Intrinsic(fuguex::intrinsics::Error<StateError>),
+    Intrinsic(metaemu::intrinsics::Error<StateError>),
     #[error("error lifting instruction at {0}: {1}")]
     Lift(Address, #[source] fugue::ir::error::Error),
     #[error(transparent)]

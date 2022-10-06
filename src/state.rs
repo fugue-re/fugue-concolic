@@ -20,9 +20,9 @@ use fugue::bytes::{ByteCast, Endian, Order};
 use fugue::ir::il::pcode::{Operand, Register};
 use fugue::ir::{Address, Translator};
 
-use fuguex::state::paged::PagedState;
-use fuguex::state::pcode::{Error as PCodeError, PCodeState};
-use fuguex::state::{IntoStateValues, State, StateOps};
+use metaemu::state::paged::PagedState;
+use metaemu::state::pcode::{Error as PCodeError, PCodeState};
+use metaemu::state::{IntoStateValues, State, StateOps};
 
 use itertools::Itertools;
 
