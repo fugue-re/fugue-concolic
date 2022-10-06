@@ -6,10 +6,10 @@ use fugue::bytes::Order;
 use fugue::ir::{AddressValue, IntoAddress, Translator};
 use fugue::ir::il::Location;
 
-use fuguex::loader::LoaderMapping;
-use fuguex::machine::{Branch, Machine};
-use fuguex::machine::types::{Bound, StepOutcome};
-use fuguex::state::pcode::PCodeState;
+use metaemu::loader::LoaderMapping;
+use metaemu::machine::{Branch, Machine};
+use metaemu::machine::types::{Bound, StepOutcome};
+use metaemu::state::pcode::PCodeState;
 
 use parking_lot::Mutex;
 
