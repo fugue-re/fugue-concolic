@@ -14,7 +14,7 @@ dyn-clone = "1"
 either = "1"
 fnv = "1"
 fugue = { version = "0.2", registry = "fugue" }
-metaemu = { version = "0.3", registry = "fugue" }
+metaemu = { version = "0.3"}
 fxhash = "0.2"
 hashconsing = "1"
 intervals = { version = "0.1", registry = "fugue" }
