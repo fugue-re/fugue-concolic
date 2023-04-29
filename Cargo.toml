@@ -1,7 +1,10 @@
 [package]
 name = "fugue-concolic"
-version = "0.2.2"
+version = "0.2.4"
 edition = "2021"
+description = "Concolic execution Engine for Fugue"
+license = "MIT"
+repository = "https://github.com/fugue-re/fugue-concolic"
 
 [features]
 loader-all = ["metaemu/loader-all"]
@@ -13,8 +16,8 @@ loader-radare = ["metaemu/loader-radare"]
 dyn-clone = "1"
 either = "1"
 fnv = "1"
-fugue = { version = "0.2", registry = "fugue" }
-metaemu = { version = "0.3"}
+fugue = { version = "0.2", registry = "fugue" , default-features = false }
+metaemu = { version = "0.3", default-features = false }
 fxhash = "0.2"
 hashconsing = "1"
 intervals = { version = "0.1", registry = "fugue" }
