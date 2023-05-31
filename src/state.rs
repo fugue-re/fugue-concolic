@@ -291,10 +291,10 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
 
         let segment_pages = c1
             .segments()
-            .iter()
+            .iter(..)
             .map(|(iv, _)| {
-                let start = u64::from(*iv.start()) / PAGE_SIZE as u64;
-                let end = u64::from(*iv.end()) / PAGE_SIZE as u64;
+                let start = u64::from(iv.start) / PAGE_SIZE as u64;
+                let end = u64::from(iv.end) / PAGE_SIZE as u64;
                 (start..=end).into_iter()
             })
             .flatten();
