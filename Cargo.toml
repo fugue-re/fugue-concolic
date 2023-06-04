@@ -10,17 +10,17 @@ repository = "https://github.com/fugue-re/fugue-concolic"
 loader-all = ["metaemu/loader-all"]
 loader-ghidra = ["metaemu/loader-ghidra"]
 loader-idapro = ["metaemu/loader-idapro"]
-loader-radare = ["metaemu/loader-radare"]
+# loader-radare = ["metaemu/loader-radare"]
 
 [dependencies]
 dyn-clone = "1"
 either = "1"
 fnv = "1"
-fugue = { version = "0.2", registry = "fugue" , default-features = false }
-metaemu = { version = "0.3", default-features = false }
+fugue = { version = "0.2", features = ["default", "fp"]}
+metaemu = { version = "0.3", default-features = true }
 fxhash = "0.2"
 hashconsing = "1"
-intervals = { version = "0.1", registry = "fugue" }
+iset = { version = "0.2", features = ["serde"] }
 itertools = "0.10"
 parking_lot = "0.11"
 smallvec = "1"

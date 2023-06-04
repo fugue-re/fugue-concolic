@@ -26,8 +26,8 @@ use metaemu::state::{IntoStateValues, State, StateOps};
 
 use itertools::Itertools;
 
-use intervals::Interval;
-use intervals::collections::DisjointIntervalSet as IntervalSet;
+use std::ops::Range;
+use iset::IntervalSet as IntervalSet;
 
 use thiserror::Error;
 
@@ -272,10 +272,12 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         self.symbolic_temporaries = enabled;
     }
 
-    pub fn symbolic_memory_region<I: Into<Interval<Address>>>(&mut self, range: I) {
+    pub fn symbolic_memory_region<I: Into<Range<Address>>>(&mut self, range: I) {
         let range = range.into();
+        // +1 because end is exclusive. May cause problem when end is the max value of u64
+        // TODO: require iset use RangeBounds instead of Range
         self.symbolic_memory_regions
-            .insert(u64::from(*range.start())..=u64::from(*range.end()));
+            .insert(u64::from(range.start)..(u64::from(range.end)+1));  
     }
 
     fn merge_memory_pages(
@@ -483,7 +485,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
     }
 
     pub fn is_symbolic_memory(&self, start: Address, length: usize) -> bool {
-        self.symbolic_memory_regions.overlaps(u64::from(start)..=u64::from(start)+(length as u64 - 1)) || {
+        self.symbolic_memory_regions.has_overlap(u64::from(start)..=u64::from(start)+(length as u64 - 1)) || {
             let start = u64::from(start);
             Self::is_symbolic(&self.pages, start, length)
         }
@@ -519,7 +521,7 @@ impl<'ctx, O: Order, VS: ValueSolver<'ctx>> ConcolicState<'ctx, O, VS> {
         match operand {
             Operand::Address { value, size } => {
                 self.symbolic_memory_regions
-                    .overlaps(u64::from(value)..=u64::from(value)+(*size as u64 - 1))
+                    .has_overlap(u64::from(value)..=u64::from(value)+(*size as u64 - 1))
             }
             Operand::Register { .. } => {
                 self.symbolic_registers
